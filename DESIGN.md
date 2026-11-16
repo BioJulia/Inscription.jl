@@ -151,10 +151,14 @@ parse_body(io, e)
 ```
 
 ## 3. Architecture: memory-level codecs as the extension point
-**Decision (in principle), Proposal (details).** Users never add methods to `load` or
-`store`. They add methods to functions that work on memory views, and this package's
-generic code gets the memory view from the reader or writer. One method per direction
-gives decoding from bytes, loading from any reader, and bulk loading.
+**Decision.** Users never add methods to `load`, `store`, or any other function they call.
+They provide a *codec* for their type, which works on memory views, and this package's
+generic code gets the memory view from the reader or writer. One codec gives decoding
+from bytes, loading from any reader, and bulk loading, and the same for encoding.
+
+There are three kinds of codec. For primitive types whose bits are their encoding, the
+owner declares a trait and this package implements the codec ([§4](#4-bits-kinds)).
+Every other codec is hand-written as three methods (below).
 
 ### Failure values
 **Decision:** failures caused by the data are returned as a small isbits value, never
@@ -196,27 +200,23 @@ It works the same on `try_decode`, whose success value is a tuple:
 `(x, n) = @try_return try_decode(mem, T, enc)`. The macro only checks
 `isa DecodeError`, so it doesn't care what the success type is.
 
-### The interface
+### The functions callers use
 ```julia
-# Upper bound on the encoded size of any T in this encoding. Must be constant-foldable.
-max_encoded_size(::Type{T}, ::Encoding)::Int
+# Upper bound on the encoded size of any T in this encoding. Constant-folds.
+max_encoded_size(::Type{T}, enc::Encoding)::Int
 
 # Decode a T from the start of mem, treating mem as the COMPLETE input. Return the value
 # and the number of bytes used, or a DecodeError.
-try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{T}, ::Encoding)::Union{Tuple{T, Int}, DecodeError}
+try_decode(mem::MemoryView{UInt8}, ::Type{T}, enc::Encoding)::Union{Tuple{T, Int}, DecodeError}
 
 # Encode x at the start of mem. Return the number of bytes written,
 # or nothing if mem is too short (the only way encoding can fail).
-encode!(mem::MutableMemoryView{UInt8}, x::T, ::Encoding)::Union{Nothing, Int}
+encode!(mem::MutableMemoryView{UInt8}, x::T, enc::Encoding)::Union{Nothing, Int}
 ```
-
-For types covered by the bits traits ([§4](#4-the-bits-traits)) with an `Endianness`
-encoding, this package provides all of these. A custom codec implements them directly.
-Everything else is generic:
 
 | Function | Layer | On a data failure |
 |----------|-------|-------------------|
-| `try_decode(mem, T, enc)` | 0 | returns `DecodeError` (users implement this) |
+| `try_decode(mem, T, enc)` | 0 | returns `DecodeError` |
 | `decode(mem, T, enc)` | 0 | throws the `DecodeError` |
 | `try_load(io, T, enc)` | 1 | returns `DecodeError` |
 | `load(io, T, enc)` | 1 | throws the `DecodeError` |
@@ -226,17 +226,58 @@ This follows Julia's `tryparse` / `parse` convention.
 **Decision:** `decode` / `try_decode` take no offset argument. Users slice the memory
 view instead, e.g. `try_decode(mem[5:end], UInt16, LittleEndian())`.
 
-### Contract for `try_decode`
+**Decision:** `max_encoded_size`, `try_decode` and `encode!` have one method each, and
+nobody extends them. Each branches on the kind of codec for `T` and `enc`, which is
+constant-folded, so only one branch is compiled:
+
+```julia
+@inline function try_decode(mem::MemoryView{UInt8}, ::Type{T}, enc::Encoding) where {T}
+    mem = ImmutableMemoryView(mem)
+    kind = codec_kind(T, enc)  # BitsLoadable(), BitsStorable() or NotBits()
+    kind isa NotBits && return codec_try_decode(mem, T, enc)
+    n = bits_encoded_size(T)
+    length(mem) < n && return short_error(mem)
+    x = @try_return unsafe_decode_bits(kind, mem, 0, T, enc)
+    return (x, n)
+end
+```
+
+An earlier version used the same functions as callers' API and as extension points.
+Then the package had to implement the bits codecs as methods for every `T` with
+`Endianness`, which threw a `MethodError` unless the trait opted `T` in. For bits types,
+`max_encoded_size` carried no information beyond the type's size, and a hand-written
+method for `::Encoding` was ambiguous with the package's methods for `Endianness`.
+Separate functions remove all three problems. The cost is two names per concept: codec
+authors implement `codec_try_decode` but call `try_decode`.
+
+### Hand-written codecs
+```julia
+codec_max_encoded_size(::Type{T}, ::E)::Int
+codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{T}, ::E)::Union{Tuple{T, Int}, DecodeError}
+codec_encode!(mem::MutableMemoryView{UInt8}, x::T, ::E)::Union{Nothing, Int}
+```
+
+* `E` may be a concrete encoding type, or an abstract one such as `Endianness` or
+  `Encoding`. The `codec_*` functions are never defined for bits types, so no method
+  is ambiguous with this package's.
+* A codec must be defined by the owner of either `T` or `E`, so as not to commit type
+  piracy. `Char` with `UTF8()` is the codec this package defines.
+* Callers may pass a mutable or immutable view to `try_decode`; the codec always gets an
+  `ImmutableMemoryView`.
+* The bits codecs of §4 follow the same contracts, by construction.
+
+### Contract for `codec_try_decode`
 1. **Pure.** The result depends only on the contents of `mem`, and no reference to
    `mem` is kept.
 2. **Bounded.** On success, `0 ≤ n ≤ min(length(mem), max_encoded_size(T, enc))`.
 3. **`mem` is the complete input.** The end of `mem` is treated as the end of the data.
-   An empty `mem` gives `EndOfInput`. A `mem` that ends partway through an encoding gives
+   An empty `mem` gives `EndOfInput`, unless a `T` can be encoded in zero bytes, as a
+   singleton type can. A `mem` that ends partway through an encoding gives
    `Truncated`, unless the encoding defines a meaning for incomplete input, as UTF-8 does
    ([§8](#char)).
 4. **Decided by the first `max_encoded_size(T, enc)` bytes.** If `length(mem) ≥
    max_encoded_size(T, enc)`, the result is the same for every memory that starts with
-   those bytes. In other words, `try_decode` never looks further than
+   those bytes. In other words, decoding never looks further than
    `max_encoded_size(T, enc)` bytes.
 
 Rule 4 is what lets layer 1 decode from a reader's buffer even though the buffer is not
@@ -245,7 +286,7 @@ prefix-stable", "`InvalidData` is final", "`NotEnoughBytes` is honest"). Those a
 that a decoder never needs to know where the input ends, and UTF-8 with `String`
 semantics does need to know.
 
-### Contract for `encode!`
+### Contract for `codec_encode!`
 * It must succeed if `length(mem) ≥ max_encoded_size(T, enc)`.
 * It may write to `mem` beyond the returned byte count, and may write to `mem` even when
   it returns `nothing`. Those bytes are scratch space, because nothing is consumed.
@@ -253,13 +294,13 @@ semantics does need to know.
 ### Generic reader and writer code
 ```julia
 @inline function try_load(io::AbstractBufReader, ::Type{T}, enc::Encoding)::Union{T, DecodeError} where {T}
-    buffer = get_buffer(io)
+    buffer = get_buffer(io)::ImmutableMemoryView{UInt8}
     if length(buffer) < max_encoded_size(T, enc)
-        buffer = @noinline _buffer_value(io, max_encoded_size(T, enc))
+        buffer = @noinline buffer_value(io, max_encoded_size(T, enc))
     end
-    r = try_decode(buffer, T, enc)
-    r isa DecodeError && return r
-    (x, n) = r
+    result = try_decode(buffer, T, enc)
+    result isa DecodeError && return result
+    (x, n) = result
     @inbounds consume(io, n)
     return x
 end
@@ -268,35 +309,40 @@ end
 # gives the right answer: with n bytes, rule 4 means more bytes can't change it, and at
 # EOF the buffer is the complete input. get_nonempty_buffer throws BufferTooShort if the
 # reader's capacity is smaller than n.
-function _buffer_value(io::AbstractBufReader, n::Int)
+function buffer_value(io::AbstractBufReader, n::Int)::ImmutableMemoryView{UInt8}
     buffer = get_nonempty_buffer(io, n)
-    return buffer === nothing ? get_buffer(io) : buffer  # nothing: EOF before n bytes
+    # nothing means EOF before n bytes could be buffered
+    return buffer === nothing ? get_buffer(io)::ImmutableMemoryView{UInt8} : buffer
 end
 
 function load(io::AbstractBufReader, ::Type{T}, enc::Encoding)::T where {T}
-    r = try_load(io, T, enc)
-    r isa DecodeError && throw(r)
-    return r
+    result = try_load(io, T, enc)
+    result isa DecodeError && throw(result)
+    return result
 end
 
-@inline function store(io::AbstractBufWriter, x::T, enc::Encoding) where {T}
-    buffer = get_buffer(io)
+@inline function store(io::AbstractBufWriter, x::T, enc::Encoding)::Int where {T}
+    buffer = get_buffer(io)::MutableMemoryView{UInt8}
     if length(buffer) < max_encoded_size(T, enc)
-        buffer = @something(
-            @noinline(get_nonempty_buffer(io, max_encoded_size(T, enc))),
-            throw(IOError(IOErrorKinds.BufferTooShort)),  # also when full, see §6
-        )
+        buffer = @noinline write_buffer(io, max_encoded_size(T, enc))
     end
-    n = encode!(buffer, x, enc)::Int  # guaranteed by the contract
+    n = encode!(buffer, x, enc)::Int # guaranteed by the contract of codec_encode!
     @inbounds consume(io, n)
     return n
+end
+
+# Get a writer's buffer of at least n bytes, or throw BufferTooShort (also when full, §6).
+function write_buffer(io::AbstractBufWriter, n::Int)::MutableMemoryView{UInt8}
+    buffer = get_nonempty_buffer(io, n)
+    buffer === nothing && throw(IOError(IOErrorKinds.BufferTooShort))
+    return buffer
 end
 ```
 
 * **Fast path.** If the buffer holds at least `max_encoded_size(T, enc)` bytes, rule 4
   makes `try_decode`'s answer final. For bits types this is a length check and an
   unaligned load. `try_decode`'s own length check repeats the precheck and LLVM removes
-  it *(verified: a toy version compiles to a single compare and a single load)*.
+  it *(verified: big-endian `UInt32` compiles to one load and a byte swap)*.
 * **Slow path: buffer `max_encoded_size(T, enc)` bytes, or up to EOF, then decode
   once.** This is just `get_nonempty_buffer(io, n)`, which already has the right
   semantics: it returns `nothing` at EOF and throws `BufferTooShort` if the reader's
@@ -329,71 +375,124 @@ help with custom readers that return early. And UTF-8 is the only variable-lengt
 in scope; for fixed-size types the two approaches are identical.
 
 So it adds a function and a contract for no observable benefit. Adding it later is
-non-breaking: an optional method whose default is `max_encoded_size` changes nothing for
-existing codecs.
+non-breaking: an optional codec function whose default is `codec_max_encoded_size`
+changes nothing for existing codecs.
 
 **Side finding for BufferIO:** because `BufReader` blocks until its buffer is full, it
 can't currently be used for interactive input, such as line-by-line reading from a pipe.
 A peer that sends one line and waits for a reply deadlocks with it. Terminals were not
 tested. This may be worth an issue in BufferIO, independent of this package.
 
-## 4. The bits traits
-**Decision:** start with Bool-valued trait functions; redesign within 0.x if they turn
-out to be too hard to extend.
+## 4. Bits kinds
+**Decision:** one trait, `bits_kind`, with three values. It answers one question about a
+primitive type `T`: *is the encoding of a `T` exactly its bits, up to byte order?*
 
-The trait answers one question: *is the encoding of `T` exactly its in-memory bytes, up
-to byte order?* That question splits by direction:
-
-* **Storable as bits**: for every `x::T`, the in-memory bytes of `x` are its encoding.
-  This requires an isbits type with no padding, whose layout is the wire format.
-* **Loadable from bits**: in addition, every pattern of `sizeof(T)` bytes is a valid `T`
-  with the intended meaning.
+* **`BitsLoadable()`**: yes, and every pattern of `bitsizeof(T)` bits is a valid `T`
+  with the intended meaning. The owner implements nothing else. Examples: `UInt32`,
+  `Float64`.
+* **`BitsStorable()`**: the bits of every valid `T` are its encoding, but not every bit
+  pattern is a valid `T`. The owner also implements `is_valid_bits`. Examples: `Bool`,
+  `@enum` types.
+* **`NotBits()`**, the default: the type needs a hand-written codec (§3).
 
 ```julia
-is_bits_storable(::Type)::Bool  # default false
-is_bits_loadable(::Type)::Bool  # default false; true implies is_bits_storable
+abstract type BitsKind end
+struct BitsLoadable <: BitsKind end
+struct BitsStorable <: BitsKind end
+struct NotBits <: BitsKind end
+
+bits_kind(::Type)::BitsKind = NotBits()
+
+# Only for BitsStorable types: whether the bits `raw` are a valid T
+is_valid_bits(::Type{T}, raw::Unsigned)::Bool
 ```
 
 Rust has the same split: bytemuck's `NoUninit` / `AnyBitPattern`, and zerocopy's
 `IntoBytes` / `FromBytes`.
 
-Both require `Base.bitsizeof(T) == 8 * sizeof(T)`. Julia rounds `sizeof` up for
-primitive types whose width is not a power of two: a 24-bit primitive has
-`sizeof == 4` but `Base.bitsizeof == 24` *(verified)*. `Base.bitsizeof` is public in
-Julia 1.14, and the comparison constant-folds *(verified)*. Generic code should check it
-rather than trust the trait blindly. See [§8](#bit-widths-that-are-not-a-multiple-of-8).
+An earlier version had two Bool traits, `is_bits_storable` and `is_bits_loadable`. They
+have four combinations, and one of them (loadable but not storable) is impossible. Three
+values match the three cases exactly.
 
-* `Base.bitsizeof(Bool) == 8`, so this check does not exclude `Bool`; the trait itself
-  does.
-* BufferIO supports Julia 1.11, so before 1.14 a fallback is needed, e.g.
-  `8 * sizeof(T)`. That is correct for all of Base's types, and narrow primitive types
-  are rare that early.
-
-When the traits are `true`, this package provides, for `Endianness` encodings:
-* `max_encoded_size(T, ::Endianness) = sizeof(T)`;
-* `encode!` (if storable) and `try_decode` (if loadable), using unaligned loads and
-  stores ([§9](#9-performance-notes));
-* `memcpy`-based bulk loads and stores ([§7](#7-bulk-loads-and-stores)).
-
-So the traits are a shortcut for implementing the §3 interface, plus permission to use
-bulk `memcpy`. A type that is storable but not loadable, such as `Bool`, implements
-`try_decode` itself and gets the rest.
+The trait only applies with `LittleEndian()` and `BigEndian()`, and only to primitive
+types; it is ignored otherwise. With other encodings, every type needs a hand-written
+codec, as `Bool` does with a C-style `CBool` encoding (§2).
 
 Contract:
 * The trait is a property of the type, and must be constant-foldable.
-* Only the owner of a type should define it.
+* Only the owner of a type should define it, and `is_valid_bits`.
 
-Base types:
+### The encoding of a bits type
+**Decision:** a bits type is encoded as its `bitsizeof(T)` bits in
+`N = cld(bitsizeof(T), 8)` bytes, in the encoding's byte order. That is
+`max_encoded_size(T, enc)`.
 
-| Type | Loadable | Storable | Notes |
-|------|:-:|:-:|-------|
-| `Int8`–`Int128`, `UInt8`–`UInt128` | ✓ | ✓ | |
-| `Float16`, `Float32`, `Float64` | ✓ | ✓ | |
-| `Bool` | ✗ | ✓ | [§8](#bool) |
-| `@enum` types | ✗ | ✓ | primitive, but not every bit pattern is valid *(verified)* |
-| Primitives of other widths (24-bit, 29-bit, ...) | ✗ | ✗ | [§8](#bit-widths-that-are-not-a-multiple-of-8) |
-| `Char` | ✗ | ✗ | encoded with `UTF8()`, [§8](#char) |
-| `Ptr` | ✗ | ✗ | meaningless across processes |
+`N` is not `sizeof(T)`. On Julia 1.14, the size of a primitive type is rounded up to a
+power of two bytes: a 24-bit type has `sizeof` 4 and a 144-bit one 32, and loading one
+reads `sizeof(T)` bytes *(verified, 1.14.0-beta1)*. A 24-bit integer in a file is 3
+bytes. Julia 1.14 also allows widths that are not a multiple of 8, such as 22 bits.
+Before 1.14, widths are multiples of 8, `sizeof(T)` is exactly the bit width divided by 8,
+and `Base.bitsizeof` doesn't exist; `8 * sizeof(T)` is used instead.
+
+**Padding bits.** When `bitsizeof(T)` is not a multiple of 8, the unused high bits of
+the most significant byte are written as zero, and decoding rejects nonzero ones as
+`InvalidData`. The padding check is this package's job, so `BitsLoadable` still means
+"every pattern of `bitsizeof(T)` bits is valid".
+
+**Loading and storing.**
+* If the bits of `T` fill its bytes (`bitsizeof(T) == 8 * sizeof(T)`), a value is loaded
+  and stored directly with an unaligned access, and byte-swapped if needed
+  ([§9](#9-performance-notes)).
+* Otherwise, it is loaded as the `NTuple{N, UInt8}` of its encoding, which reads exactly
+  `N` bytes, and assembled with `zext_int`, `shl_int` and `or_int`. Storing is the
+  reverse, with `lshr_int` and `trunc_int`. The integer intrinsics don't depend on how
+  `T` is laid out in memory, unlike reinterpreting the bytes. A plain load or byte swap
+  of such a type would be wrong: the load reads `sizeof(T)` bytes, and `bswap_int` throws
+  for 24 and 22 bits *(verified, 1.14.0-beta1)*. A 24-bit type compiles to three byte
+  loads and shifts *(verified)*.
+
+**Bulk copies** (§7) use `memcpy` or a vectorized byte swap loop only when an array of
+`T` is its encoding, up to byte order: the bits of `T` fill its bytes, and
+`Base.elsize(Memory{T}) == sizeof(T)`. Before Julia 1.14, `sizeof` excluded the padding
+that the internal `Base.aligned_sizeof` includes, so a 24-bit type has `sizeof` 3 but its
+array elements are 4 bytes apart *(verified, 1.11)*. Julia 1.14 merged the two, and
+`Base.elsize` is the public way to get the padded size. Other bits types use a loop that
+decodes or encodes each element at its byte offset.
+
+### Validity of bits-storable types
+**Decision:** a bits-storable type implements a validity check, not a decoder. With the
+encoding fixed to the bits, decoding is fully determined except for which bit patterns
+are valid. So the owner doesn't repeat the length check, the byte order and the padding.
+
+* `raw` holds the `bitsizeof(T)` bits of the would-be `T`, zero-extended into the
+  smallest of `UInt8`, `UInt16`, `UInt32`, `UInt64` and `UInt128` that can hold them. For
+  a valid `x::T` whose bits fill that integer, `raw == reinterpret(typeof(raw), x)`.
+* The check has no notion of byte order. Integers don't have one; only bytes in memory
+  do, and the encoding's byte order has already been undone. The check is the same
+  whether the input was little-endian or big-endian.
+* The check can't receive a `T`, because an invalid `T` can't be made safely: a pointer
+  load of `Bool` keeps only its lowest bit ([§8](#bool)). Decoding builds `raw` from the
+  bytes, checks it, and only then converts it to `T` with `bitcast` or `trunc_int`.
+* Bits-storable types wider than 128 bits can be encoded, but decoding them throws an
+  `ArgumentError`, because no integer type can hold their bits. If Julia gains an
+  arbitrary-width integer type, such as a `BitInt{N}`, it could carry them.
+
+Decoding many elements of a bits-storable type is a tight loop that loads, checks and
+converts each one.
+
+### Base types
+
+| Type | Kind | Notes |
+|------|------|-------|
+| `Int8`–`Int128`, `UInt8`–`UInt128` | `BitsLoadable` | |
+| `Float16`, `Float32`, `Float64` | `BitsLoadable` | |
+| `Bool` | `BitsStorable` | only `0x00` and `0x01` are valid, [§8](#bool) |
+| `@enum` types | `BitsStorable` | primitive, but not every bit pattern is a member *(verified)*, [§8](#enums) |
+| `Char` | `NotBits` | encoded with `UTF8()`, [§8](#char) |
+| `Ptr` | `NotBits` | meaningless across processes |
+
+Primitive types of other widths, such as 24-bit integers, can be any kind; their owner
+decides. See [§8](#bit-widths-that-are-not-a-multiple-of-8).
 
 ## 5. Loading: semantics
 ```julia
@@ -507,7 +606,7 @@ load_all!(io::AbstractBufReader, dst::MutableMemoryView{T}, ::Encoding)::Int
 
 * A reader's buffer is not the complete input. So the bulk decode runs only while at
   least `max_encoded_size(T, enc)` bytes remain; for fixed-size types, that is every
-  whole element in the buffer. The tail goes through `_buffer_value` from §3, one
+  whole element in the buffer. The tail goes through `buffer_value` from §3, one
   element at a time.
 * Each element is all-or-nothing. Loading stops at the first element that fails,
   including an invalid one, and returns the count loaded so far. Nothing of the failing
@@ -701,7 +800,16 @@ Memory refs *(verified, 1.15.0-DEV)*:
   loop does not vectorize and is about 13× slower. Bulk functions check lengths once, up
   front, then pass `false`.
 
-Why switch, given no speedup:
+Why switch:
+* **Alias information.** A memory-ref access is known to touch only the data of a
+  `Memory`. Its alias scope is `memorybuf`, with every other region, including mutable
+  struct fields, in `!noalias`. A pointer access is scoped as possibly touching any
+  data. So with pointers, a store into a writer's buffer forces the writer's fields to
+  be reloaded. *(verified, 1.15.0-DEV.751, same build, pointer vs memory-ref version of
+  this package:)* storing 1M `UInt32` to a `BufWriter{IOBuffer}` drops from about
+  1.7 to 0.8–0.9 ns per value, and to a `VecWriter` from about 1.5 to 1.1–1.2 ns.
+  Loading from a `BufReader{IOBuffer}` drops from about 0.51 to 0.44–0.48 ns. Bulk
+  decoding and encoding is unchanged within noise.
 * No `GC.@preserve` and no raw pointers. There is less unsafe code to get wrong, and the
   memory stays rooted automatically.
 * It fits MemoryViews directly. A `MemoryView` stores a `MemoryRef` plus a length, so the
@@ -802,30 +910,46 @@ Consequences for the design:
 2. **The name of the bulk store to a writer** (§7), e.g. `store_all`.
 3. **Upstream BufferIO item:** the `fill_buffer` compaction guarantee (§5).
 
-## Appendix A: state of the prototype (2026-11-15)
-Problems found while reviewing `src/BufferSerde.jl`. Most become moot with the
-architecture in §3; they are listed so none survive a rewrite.
+## Appendix A: implementation notes (2026-11-15)
+The prototype was rewritten from scratch to follow this document. The problems found in
+the old `src/BufferSerde.jl` are gone with it. Choices made while implementing, where the
+document left details open:
 
-* **The package does not precompile:** `_load_into_slowpath!` (line 292) uses `T`
-  without `where {T}`.
-* Missing imports: `fill_buffer`, `grow_buffer`, `IOError`, `IOErrorKinds`. Also,
-  `get_minimum_buffer` no longer exists in BufferIO; it is now
-  `get_nonempty_buffer(io, n)`.
-* `[compat]` is stale: it lists BufferIO `0.2.5` and MemoryViews `0.4.1`. BufferIO is now
-  at 0.3.4 and uses MemoryViews 0.5.
-* `byte_order` calls `bswap_int` on 1-byte types, which throws, so
-  `store(io, Int8(1), BigEndian())` fails on little-endian hosts.
-* `_load_slower_path`:
-  * treats `HostEndian` as big-endian;
-  * returns the wrong result on big-endian hosts;
-  * calls `zext_int(T, 0x00)`, which is invalid for 1-byte `T`.
-* `load(io::AbstractBufWriter, ::Type{UInt8})` should take a reader, and it does not
-  consume the byte.
-* `_load_into!`:
-  * `memlen < sz` compares an element count with a byte count;
-  * it errors instead of filling when the buffer holds less than one element.
-* The `PrimitiveSerialization` docstring refers to `ReadablePrimitive` and
-  `NonReadablePrimitive`, which do not exist.
-* Pointer-loading `Bool` keeps only the lowest bit ([§8](#bool)).
-* `store(io, ::Char, ::Endianness)` silently ignores its endianness argument
-  ([§2](#2-encodings)).
+* **Error kinds are namespaced** in a module `DecodeErrorKinds`, like BufferIO's
+  `IOErrorKinds`, so they are written `DecodeErrorKinds.EndOfInput` rather than bare
+  `EndOfInput`.
+* *(Superseded by Appendix B and the rewritten §3 and §4: the Bool traits, and codecs
+  implemented as methods of `try_decode`, `encode!` and `max_encoded_size`.)*
+* **Only memory views are accepted.** Every function takes `MemoryView` arguments, and
+  callers convert other memory, e.g. `MemoryView(v)` for a `Vector{UInt8}` or a
+  `String`. A method taking any memory and converting may be added later. The one
+  conversion is that the read-only arguments (`try_decode`, `decode`, the `src` of
+  `decode_into!`, `encode_into!` and `store_all`) accept either mutability; codec authors
+  implement `codec_try_decode` for `ImmutableMemoryView{UInt8}` only.
+* **Placeholder names:** the macro is `@try_return`, and the bulk store is `store_all`
+  (§12). `store_all(io, src, enc)` returns the number of bytes written, like `store`.
+* **Enum membership** (`is_valid_bits` for `Enum` types, Appendix B) is a range check
+  when the values of the enum are contiguous, the common case, and otherwise a linear
+  scan of `instances(T)`. Whether the values are
+  contiguous is computed from `instances(T)` at compile time. `typemin(T)` and
+  `typemax(T)` are avoided, because for an enum with gaps they go through the checked
+  constructor, which looks the value up in a `Dict` at runtime.
+* **Unaligned access** uses `Core.unsafe_memoryrefload` / `Core.unsafe_memoryrefstore!`
+  when `isdefined` finds them, and pointers under `GC.@preserve` otherwise (§9). Bulk
+  copies in native byte order still use `memcpy` through pointers.
+* **Names are snake_case**, also internal ones (e.g. `unsafe_load_bits`, `buffer_value`),
+  unlike Base, which writes words together (`bitreverse`).
+
+## Appendix B: three kinds of codec (2026-11-16)
+§3 and §4 were rewritten for this design, replacing the Bool traits
+`is_bits_storable` / `is_bits_loadable` and the codec methods that were added to
+`max_encoded_size`, `try_decode` and `encode!` themselves. In short:
+
+* `bits_kind` has three values: `BitsLoadable`, `BitsStorable` and `NotBits` (§4).
+* Bits-storable types implement `is_valid_bits` instead of `try_decode` (§4).
+* Hand-written codecs implement `codec_max_encoded_size`, `codec_try_decode` and
+  `codec_encode!`; the functions callers use have one method each (§3).
+* Bits types are encoded in `cld(bitsizeof(T), 8)` bytes, also when that is less than
+  `sizeof(T)`, with zero padding bits (§4).
+* Bulk copies require `Base.elsize(Memory{T}) == sizeof(T)`, which fixed bulk decoding
+  and encoding of 3- and 18-byte types before Julia 1.14 (§4).
