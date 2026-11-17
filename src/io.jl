@@ -45,14 +45,14 @@ DecodeError(BufferSerde.DecodeErrorKinds.EndOfInput)
     if length(buffer) < max_encoded_size(T, enc)
         buffer = @noinline buffer_value(io, max_encoded_size(T, enc))
     end
-    result = try_decode(buffer, T, enc)
+    result = try_decode_sized(buffer, 1, T, enc)
     result isa DecodeError && return result
     (x, n) = result
     @inbounds consume(io, n)
     return x
 end
 
-# Buffer at least n bytes, or everything up to EOF. Either way, `try_decode` on the
+# Buffer at least n bytes, or everything up to EOF. Either way, decoding from the
 # result gives the right answer: with n bytes, rule 4 of `try_decode`'s contract means
 # more bytes can't change it, and at EOF the buffer is the complete input.
 # `get_nonempty_buffer` throws `BufferTooShort` if the capacity of `io` is smaller than n.
@@ -120,7 +120,7 @@ julia> io.vec
     end
     # The buffer holds at least `max_encoded_size` bytes, so encoding succeeds, also by the
     # contract of `codec_encode!`.
-    n = (@inbounds encode!(buffer, x, enc))::Int
+    n = @inbounds encode!(buffer, x, enc)
     @inbounds consume(io, n)
     return n
 end

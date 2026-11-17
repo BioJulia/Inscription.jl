@@ -10,8 +10,8 @@ of bytes of `src` used. `src` is treated as the complete input, as in
 
 `dst` and `src` must not overlap.
 
-To learn why decoding stopped before `dst` was full, call `try_decode` on the remaining
-bytes of `src`.
+To learn why decoding stopped before `dst` was full, call `try_decode` at the index after
+the bytes used.
 
 With an [`Endianness`](@ref) encoding, types whose [`bits_kind`](@ref) is
 [`BitsLoadable`](@ref) are copied with `memcpy`, or a vectorized byte swap loop, when
@@ -48,7 +48,7 @@ end
         complete::Bool,
     )::Tuple{Int, Int} where {T}
     kind = codec_kind(T, enc)
-    if !(kind isa NotBits)
+    if !(kind isa ManualCodec)
         # Fixed size: each whole element in src is decided
         element_size = bits_encoded_size(T)
         n_max = min(length(dst), div(length(src), element_size))
@@ -88,7 +88,7 @@ end
         GC.@preserve dst src unsafe_copyto!(Ptr{UInt8}(pointer(dst)), pointer(src), n * sizeof(T))
     else
         for i in 0:(n - 1)
-            x = unsafe_load_bits(src, i * sizeof(T), T, e)
+            x = unsafe_decode_bits(BitsLoadable(), src, i * sizeof(T), T, e)::T
             unsafe_store_at!(dst, x, i * sizeof(T))
         end
     end
@@ -104,7 +104,8 @@ Encode elements of `src` into the start of the bytes `dst`, until `src` is exhau
 `dst` has no room for the next element. Return the number of elements encoded, and the
 number of bytes written.
 
-`dst` and `src` must not overlap. Bytes of `dst` after the returned number of bytes may be overwritten.
+`dst` and `src` must not overlap. Bytes of `dst` after the returned number of bytes may
+be overwritten.
 
 With an [`Endianness`](@ref) encoding, types whose [`bits_kind`](@ref) is
 [`BitsLoadable`](@ref) or [`BitsStorable`](@ref) are copied with `memcpy`, or a
@@ -132,7 +133,7 @@ julia> dst
 function encode_into!(
         dst::MutableMemoryView{UInt8}, src::MemoryView{T}, enc::Encoding
     )::Tuple{Int, Int} where {T}
-    if !(codec_kind(T, enc) isa NotBits)
+    if !(codec_kind(T, enc) isa ManualCodec)
         element_size = bits_encoded_size(T)
         n_elements = min(length(src), div(length(dst), element_size))
         if is_dense_bits(T)
@@ -164,7 +165,7 @@ end
     else
         for i in 0:(n - 1)
             x = unsafe_load_at(src, T, i * sizeof(T))
-            unsafe_store_bits(dst, i * sizeof(T), x, e)
+            unsafe_encode_bits!(dst, i * sizeof(T), x, e)
         end
     end
     return nothing

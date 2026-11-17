@@ -233,8 +233,8 @@ constant-folded, so only one branch is compiled:
 ```julia
 @inline function try_decode(mem::MemoryView{UInt8}, ::Type{T}, enc::Encoding) where {T}
     mem = ImmutableMemoryView(mem)
-    kind = codec_kind(T, enc)  # BitsLoadable(), BitsStorable() or NotBits()
-    kind isa NotBits && return codec_try_decode(mem, T, enc)
+    kind = codec_kind(T, enc)  # BitsLoadable(), BitsStorable() or ManualCodec()
+    kind isa ManualCodec && return codec_try_decode(mem, T, enc)
     n = bits_encoded_size(T)
     length(mem) < n && return short_error(mem)
     x = @try_return unsafe_decode_bits(kind, mem, 0, T, enc)
@@ -393,15 +393,15 @@ primitive type `T`: *is the encoding of a `T` exactly its bits, up to byte order
 * **`BitsStorable()`**: the bits of every valid `T` are its encoding, but not every bit
   pattern is a valid `T`. The owner also implements `is_valid_bits`. Examples: `Bool`,
   `@enum` types.
-* **`NotBits()`**, the default: the type needs a hand-written codec (§3).
+* **`ManualCodec()`**, the default: the type needs a hand-written codec (§3).
 
 ```julia
 abstract type BitsKind end
 struct BitsLoadable <: BitsKind end
 struct BitsStorable <: BitsKind end
-struct NotBits <: BitsKind end
+struct ManualCodec <: BitsKind end
 
-bits_kind(::Type)::BitsKind = NotBits()
+bits_kind(::Type)::BitsKind = ManualCodec()
 
 # Only for BitsStorable types: whether the bits `raw` are a valid T
 is_valid_bits(::Type{T}, raw::Unsigned)::Bool
@@ -488,8 +488,8 @@ converts each one.
 | `Float16`, `Float32`, `Float64` | `BitsLoadable` | |
 | `Bool` | `BitsStorable` | only `0x00` and `0x01` are valid, [§8](#bool) |
 | `@enum` types | `BitsStorable` | primitive, but not every bit pattern is a member *(verified)*, [§8](#enums) |
-| `Char` | `NotBits` | encoded with `UTF8()`, [§8](#char) |
-| `Ptr` | `NotBits` | meaningless across processes |
+| `Char` | `ManualCodec` | encoded with `UTF8()`, [§8](#char) |
+| `Ptr` | `ManualCodec` | meaningless across processes |
 
 Primitive types of other widths, such as 24-bit integers, can be any kind; their owner
 decides. See [§8](#bit-widths-that-are-not-a-multiple-of-8).
@@ -945,7 +945,7 @@ document left details open:
 `is_bits_storable` / `is_bits_loadable` and the codec methods that were added to
 `max_encoded_size`, `try_decode` and `encode!` themselves. In short:
 
-* `bits_kind` has three values: `BitsLoadable`, `BitsStorable` and `NotBits` (§4).
+* `bits_kind` has three values: `BitsLoadable`, `BitsStorable` and `ManualCodec` (§4).
 * Bits-storable types implement `is_valid_bits` instead of `try_decode` (§4).
 * Hand-written codecs implement `codec_max_encoded_size`, `codec_try_decode` and
   `codec_encode!`; the functions callers use have one method each (§3).

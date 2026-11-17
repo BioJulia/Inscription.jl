@@ -2,62 +2,93 @@
     abstract type BitsKind end
 
 The kinds of [`bits_kind`](@ref), currently: [`BitsLoadable`](@ref),
-[`BitsStorable`](@ref) and [`NotBits`](@ref).
+[`BitsStorable`](@ref) and [`ManualCodec`](@ref).
 
-These zero-sized trait structs signal how a primitive type `T` can be loaded/stored:
-* If the serialization is the same as the in-memory representation, and all
-  bitpatterns are valid, it can be loaded/stored with a pointer operations,
-  and so `bits_kind(T)` should be `BitsLoadable()`. Examples: `UInt32`, `Float64`.
-* Else, if serialization is the same as in-memory representation, but some
-  bitpatterns are not valid, `bits_kind(T)` must return `BitsStorable()`.
-  Examples: `Bool`.
-* Else, `bits_kind(T)` should be `NotBits()`, which is the default for types.
-  For such types
+These zero-sized trait structs signal how a primitive type or isbits struct `T` can be
+loaded and stored with an [`Endianness`](@ref) encoding:
+* If its encoding is its representation in memory, up to byte order, and all bit
+  patterns are valid, `bits_kind(T)` should be `BitsLoadable()`.
+  Examples: `UInt32`, `Float64`.
+* Else, if its encoding is its representation in memory, up to byte order, but some bit
+  patterns are not valid, `bits_kind(T)` should be `BitsStorable()`.
+  Examples: `Bool`, `Enum` types.
+* Else, `bits_kind(T)` should be `ManualCodec()`, which is the default for all types.
   Examples: `Char`.
 
-See the docstring of the individual types for more details.
+Only the owner of `T` may declare it to be `BitsLoadable` or `BitsStorable`, since it
+makes the memory layout of `T` part of its encoding.
+
+# Extended help
+## Primitive types
+A primitive type is encoded in `cld(bitsizeof(T), 8)` bytes. If its bit width is not a
+multiple of 8, the value is stored zero-extended in those bytes: encoding writes the
+unused high bits as zero, and decoding returns an `InvalidData` error if any of them is
+set. Encodings that store such values in another way, e.g. packed at the bit level, need
+a hand-written codec, see [`Encoding`](@ref).
+
+## Structs
+An isbits struct `T` that is `BitsLoadable` or `BitsStorable` is encoded as its memory
+representation, with the bytes of each primitive field, including those in nested
+structs, in the byte order of the encoding. With the native byte order, this is
+exactly its representation in memory.
+
+Such a struct must satisfy these requirements, which are checked when it is first
+encoded or decoded. If they don't hold, an `ArgumentError` is thrown:
+* It has no padding: the sizes of its fields add up to `sizeof(T)`. Note that the
+  padding of a struct depends on the platform and the Julia version.
+* The bits of each primitive field fill its bytes, so a field can't be e.g. a
+  `primitive type Foo 60 end`.
+* The [`bits_kind`](@ref) of each field is not `ManualCodec`, and the fields that are
+  structs satisfy these requirements themselves.
+* If `T` is `BitsLoadable`, all its fields are `BitsLoadable`.
 """
 abstract type BitsKind end
 
 """
     BitsLoadable() <: BitsKind
 
-Implementing `bits_kind(T) = BitsLoadable()` signals instances of type `T`
-can be loaded and stored via casting raw memory, e.g. with a pointer load.
+Implementing `bits_kind(::Type{T}) = BitsLoadable()` signals that instances of the
+primitive type or isbits struct `T` can be loaded and stored by casting raw memory,
+e.g. with a pointer load, up to byte order. All bit patterns must be valid.
 Examples: `UInt32`, `Float64`, `UInt8`.
 
 For such a type `T`, implement only:
-* `bits_kind(T) = BitsLoadable()`
+* `bits_kind(::Type{T}) = BitsLoadable()`
+
+See [`BitsKind`](@ref) for the requirements of structs.
 """
 struct BitsLoadable <: BitsKind end
 
 """
     BitsStorable() <: BitsKind
 
-Implementing `bits_kind(T) = BitsStorable()` signals instances of `T` can be
-stored by writing the `T` directly to memory, e.g. with a pointer store.
-However, all bitpatterns may not be valid. Hence, when loading instances of `T`,
-the data can be loaded as an integer, then validated via [`is_valid_bits`](@ref).
+Implementing `bits_kind(::Type{T}) = BitsStorable()` signals that instances of the
+primitive type or isbits struct `T` can be stored by writing their memory representation,
+e.g. with a pointer store, up to byte order. However, not all bit patterns are valid.
+Hence, when decoding a `T`, its bytes are first checked with [`is_valid_bits`](@ref).
 
 For such a type `T`, implement:
-* `bits_kind(T) = BitsStorable()`
-* `is_valid_bits(::T)::Bool`
+* `bits_kind(::Type{T}) = BitsStorable()`
+* `is_valid_bits(::Type{T}, bytes::NTuple{N, UInt8})::Bool`
+
+See [`BitsKind`](@ref) for the requirements of structs.
 """
 struct BitsStorable <: BitsKind end
 
 """
-    NotBits() <: BitsKind
+    ManualCodec() <: BitsKind
 
-The default value of `bits_kind(T)` is `NotBits()`. It signals that the serialized data
-of a `T` is not the same as its representation in memory. Therefore, storing and loading
-requires hand-written load and store methods.
+The default value of `bits_kind(T)` is `ManualCodec()`. It signals that the encoding of a
+`T` is not its representation in memory, so encoding and decoding it requires a
+hand-written codec. This is the case for many bits types, e.g. `Char`, as well as for
+types that are not bits types.
 
 For such a type `T`, implement per supported `E::Encoding`:
 * [`codec_max_encoded_size(::Type{T}, ::E)`](@ref codec_max_encoded_size)
 * [`codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{T}, ::E)`](@ref codec_try_decode)
 * [`codec_encode!(mem::MutableMemoryView{UInt8}, x::T, ::E)`](@ref codec_encode!)
 """
-struct NotBits <: BitsKind end
+struct ManualCodec <: BitsKind end
 
 """
     bits_kind(::Type{T})::BitsKind
@@ -66,7 +97,7 @@ Compute the `BitsKind` instance of `T`. This method should be constant foldable.
 
 See also: [`BitsKind`](@ref)
 """
-bits_kind(::Type)::BitsKind = NotBits()
+bits_kind(::Type)::BitsKind = ManualCodec()
 
 bits_kind(
     ::Union{
@@ -79,28 +110,42 @@ bits_kind(
 bits_kind(::Type{Bool}) = BitsStorable()
 bits_kind(::Type{<:Enum}) = BitsStorable()
 
-# TODO: This schema does not support more than 128 bits, but we should in the future.
-# When Julia supports arbitrary bitsized, this should be an Unsigned which rounds
-# bitsizeof(T) up to the nearest whole byte
 """
-    is_valid_bits(::Type{T}, raw::Unsigned)::Bool
+    is_valid_bits(::Type{T}, bytes::NTuple{N, UInt8})::Bool
 
-Whether the bits `raw` are a valid `T`, for a type `T` whose [`bits_kind`](@ref) is
+Whether the bytes `bytes` are a valid `T`, for a type `T` whose [`bits_kind`](@ref) is
 [`BitsStorable`](@ref). The owner of such a type must implement this method.
 
-`raw` holds the `Base.bitsizeof(T)` bits of the would-be `T` in the low bits of the
-smallest of `UInt8`, `UInt16`, `UInt32`, `UInt64` or `UInt128` that can hold them.
-Unused upper bits are zero.
+`N` is the number of bytes of the encoding of `T`, `cld(bitsizeof(T), 8)`, which is
+`sizeof(T)` for structs. The bytes are in native byte order: the byte order of the
+encoding has already been undone. So, if `bytes` are valid, they are those of
+`reinterpret(NTuple{N, UInt8}, x)` for the value `x` that is being decoded:
+* If the bit width of `T` is a multiple of 8, `reinterpret(T, bytes)` gives the value.
+  Otherwise, `reinterpret` throws, and the bytes are those of the value zero-extended to
+  `N` bytes. The unused high bits have already been checked to be zero.
+* For integer checks, use [`as_unsigned`](@ref).
+* If `T` is a struct, `is_valid_bits` is called after the `is_valid_bits` of its
+  `BitsStorable` fields. So, all fields are valid, and `reinterpret(T, bytes)` is safe.
+  This method only needs to check the invariants that involve the whole value, and may
+  simply return `true` if there are none.
+
+# Examples
+```julia
+primitive type Digit 8 end # 0 to 9
+BufferSerde.bits_kind(::Type{Digit}) = BufferSerde.BitsStorable()
+BufferSerde.is_valid_bits(::Type{Digit}, bytes::NTuple{1, UInt8}) = bytes[1] ≤ 0x09
+```
 """
 function is_valid_bits end
 
 # Bool is always 0x00 or 0x01 in memory, but pointer-loading it keeps only the lowest
 # bit, so the bits must be checked before a Bool is made from them.
-is_valid_bits(::Type{Bool}, raw::UInt8) = raw ≤ 0x01
+is_valid_bits(::Type{Bool}, bytes::NTuple{1, UInt8}) = bytes[1] ≤ 0x01
 
 # If the values of `T` are contiguous, which is the common case, a range check suffices.
 # `enum_range` is constant-folded, so only one of the branches is compiled.
-@inline function is_valid_bits(::Type{T}, raw::Unsigned) where {T <: Enum}
+@inline function is_valid_bits(::Type{T}, bytes::NTuple{N, UInt8}) where {T <: Enum, N}
+    raw = as_unsigned(bytes)
     (lo, span, contiguous) = enum_range(T, typeof(raw))
     return if contiguous
         (raw - lo) ≤ span
@@ -126,15 +171,107 @@ Base.@assume_effects :foldable function enum_range(::Type{T}, ::Type{U}) where {
     return (lo % U, span, span == length(values) - 1)
 end
 
-# The kind of the codec for T with the encoding `enc`. Hand-written codecs are `NotBits`.
-@inline function codec_kind(::Type{T}, enc::Encoding)::BitsKind where {T}
-    enc isa Endianness || return NotBits()
-    isprimitivetype(T) || return NotBits()
-    return bits_kind(T)::BitsKind
+"""
+    as_unsigned(bytes::NTuple{N, UInt8})::Unsigned
+
+Convert `bytes`, given in native byte order, to the smallest of `UInt8`, `UInt16`,
+`UInt32`, `UInt64` and `UInt128` with at least `N` bytes, zero-extended.
+Throw an `ArgumentError` if `N > 16`.
+
+This is meant for implementing [`is_valid_bits`](@ref), whose bytes are in native byte
+order, so that the byte order of the host doesn't matter. If `N` is the size of the
+result, this is `reinterpret(U, bytes)`.
+
+# Examples
+```jldoctest
+julia> x = 0x00ab_cdef;
+
+julia> bytes = NATIVE_ENDIAN === LittleEndian() ? (0xef, 0xcd, 0xab) : (0xab, 0xcd, 0xef);
+
+julia> BufferSerde.as_unsigned(bytes) === x
+true
+```
+"""
+@inline function as_unsigned(bytes::NTuple{N, UInt8}) where {N}
+    U = uint_of_size(N)
+    sizeof(U) == N && return reinterpret(U, bytes)
+    least_first = NATIVE_ENDIAN === LittleEndian() ? bytes : reverse(bytes)
+    x = zero(U)
+    for i in N:-1:1
+        x = (x << 8) | (least_first[i] % U)
+    end
+    return x
 end
 
-# The number of bits of T that hold its value. Before Julia 1.14, the bit width of
-# primitive types is a multiple of 8, and their size is not rounded up.
+# The smallest unsigned integer type with at least n bytes.
+function uint_of_size(n::Int)::Type{<:Unsigned}
+    return if n ≤ 1
+        UInt8
+    elseif n ≤ 2
+        UInt16
+    elseif n ≤ 4
+        UInt32
+    elseif n ≤ 8
+        UInt64
+    elseif n ≤ 16
+        UInt128
+    else
+        throw(ArgumentError("No unsigned integer type has $n bytes"))
+    end
+end
+
+# The kind of the codec for T with the encoding `enc`. Hand-written codecs are
+# `ManualCodec`.
+# Throw an `ArgumentError` if T is declared to be a bits type, but can't be one.
+# The check is constant-folded, so this costs nothing at runtime.
+@inline function codec_kind(::Type{T}, enc::Encoding)::BitsKind where {T}
+    enc isa Endianness || return ManualCodec()
+    kind = bits_kind(T)::BitsKind
+    kind isa ManualCodec && return kind
+    message = bits_type_error(T, kind)
+    message === nothing || throw(ArgumentError(message))
+    return kind
+end
+
+kind_name(kind::BitsKind) = nameof(typeof(kind))
+
+# Why T, whose `bits_kind` is `kind`, can't be a bits type, or `nothing` if it can.
+# See the docstring of `BitsKind` for the requirements.
+Base.@assume_effects :foldable function bits_type_error(
+        ::Type{T}, kind::BitsKind
+    )::Union{Nothing, String} where {T}
+    isprimitivetype(T) && return nothing
+    if !(isstructtype(T) && isbitstype(T))
+        return "`bits_kind($T)` is `$(kind_name(kind))`, but `$T` is neither a primitive type nor an isbits struct"
+    end
+    total_size = 0
+    for i in 1:fieldcount(T)
+        F = fieldtype(T, i)
+        name = fieldname(T, i)
+        field_kind = bits_kind(F)::BitsKind
+        if field_kind isa ManualCodec
+            return "The field `$name` of `$T` has the type `$F`, whose `bits_kind` is `ManualCodec`"
+        elseif kind isa BitsLoadable && !(field_kind isa BitsLoadable)
+            return "`$T` is `BitsLoadable`, but its field `$name` has the type `$F`, which is `$(kind_name(field_kind))`"
+        end
+        if isprimitivetype(F)
+            if !fills_bytes(F)
+                return "The field `$name` of `$T` has the type `$F`, whose bits don't fill its bytes"
+            end
+        else
+            message = bits_type_error(F, field_kind)
+            message === nothing || return message
+        end
+        total_size += sizeof(F)
+    end
+    if total_size != sizeof(T)
+        return "`$T` has $(sizeof(T) - total_size) bytes of padding, so it can't be `$(kind_name(kind))`"
+    end
+    return nothing
+end
+
+# The number of bits of the primitive type T that hold its value. Before Julia 1.14, the
+# bit width of primitive types is a multiple of 8, and their size is not rounded up.
 @static if isdefined(Base, :bitsizeof)
     bit_size(T::Type) = Base.bitsizeof(T)
 else
@@ -142,12 +279,13 @@ else
 end
 
 # The number of bytes of the encoding of a bits type.
-bits_encoded_size(T::Type) = cld(bit_size(T), 8)
+bits_encoded_size(T::Type) = isprimitivetype(T) ? cld(bit_size(T), 8) : sizeof(T)
 
 # Whether the bits of T fill its in-memory bytes, so that its memory is its encoding,
 # up to byte order. Since Julia 1.14, the size of e.g. a 24-bit primitive type is rounded
-# up to 4 bytes, and it is loaded with a 4-byte load.
-fills_bytes(T::Type) = bit_size(T) == 8 * sizeof(T)
+# up to 4 bytes, and it is loaded with a 4-byte load. Structs that are bits types have
+# no padding, as checked by `bits_type_error`.
+fills_bytes(T::Type) = !isprimitivetype(T) || bit_size(T) == 8 * sizeof(T)
 
 # Whether an array of T is its encoding, up to byte order: the bits of T fill its bytes,
 # and the elements of arrays have no gaps between them. Before Julia 1.14, `sizeof`
@@ -156,32 +294,11 @@ fills_bytes(T::Type) = bit_size(T) == 8 * sizeof(T)
 # Julia 1.14 merged the two. `Base.elsize` is the public way to get the padded size.
 is_dense_bits(T::Type) = fills_bytes(T) && Base.elsize(Memory{T}) == sizeof(T)
 
-# The unsigned integer that `is_valid_bits` receives the bits of T in.
-function raw_type(T::Type)
-    n = bit_size(T)
-    return if n ≤ 8
-        UInt8
-    elseif n ≤ 16
-        UInt16
-    elseif n ≤ 32
-        UInt32
-    elseif n ≤ 64
-        UInt64
-    elseif n ≤ 128
-        UInt128
-    else
-        throw(ArgumentError("Decoding BitsStorable types wider than 128 bits is not supported"))
-    end
-end
-
-# Whether the encoding of T is exactly as wide as its `raw_type`, so that it can be loaded
-# as that integer with one load, e.g. a 30-bit type as a `UInt32`. LLVM doesn't combine
-# the byte loads of the general path into one load when the padding check comes first,
-# as it does for big-endian input.
-function loads_as_raw(T::Type)
-    bit_size(T) ≤ 128 || return false
-    return bits_encoded_size(T) == sizeof(raw_type(T))
-end
+# Whether the encoding of the primitive type T is exactly as wide as an unsigned integer,
+# so that it can be loaded as that integer with one load, e.g. a 30-bit type as a
+# `UInt32`. LLVM doesn't combine the byte loads of the general path into one load when
+# the padding check comes first, as it does for big-endian input.
+loads_as_raw(T::Type) = bits_encoded_size(T) in (1, 2, 4, 8, 16)
 
 # Convert between native byte order and the byte order `e`.
 @inline function byte_order(e::Endianness, x)
@@ -219,22 +336,22 @@ else
     end
 end
 
-# Unaligned load of a T in byte order `e`, with the requirements of `unsafe_load_at`.
-# T must fill its bytes.
+# Unaligned load of a primitive T in byte order `e`, with the requirements of
+# `unsafe_load_at`. T must fill its bytes.
 @inline function unsafe_load_bits(mem::MemoryView, offset::Int, ::Type{T}, e::Endianness) where {T}
     return byte_order(e, unsafe_load_at(mem, T, offset))
 end
 
-# Unaligned store of x in byte order `e`, with the requirements of `unsafe_store_at!`.
-# The type of x must fill its bytes.
+# Unaligned store of the primitive x in byte order `e`, with the requirements of
+# `unsafe_store_at!`. The type of x must fill its bytes.
 @inline function unsafe_store_bits(mem::MutableMemoryView, offset::Int, x, e::Endianness)
     unsafe_store_at!(mem, byte_order(e, x), offset)
     return nothing
 end
 
-# Types whose bits don't fill their bytes are loaded and stored as the N encoded bytes,
-# and converted with integer intrinsics, which don't depend on the memory layout of T.
-# The bytes are ordered from least to most significant.
+# Primitive types whose bits don't fill their bytes are loaded and stored as the N encoded
+# bytes, and converted with integer intrinsics, which don't depend on the memory layout of
+# T. The bytes are ordered from least to most significant.
 
 # Load the N bytes at `offset` in byte order `e`, least significant first.
 @inline function unsafe_load_bytes(mem::MemoryView, offset::Int, ::Val{N}, e::Endianness) where {N}
@@ -299,51 +416,119 @@ end
     end
 end
 
+# Structs are loaded and stored as their bytes. Byte order is converted by reversing the
+# bytes of each primitive field. Structs that are bits types have no padding, and their
+# primitive fields fill their bytes, so this covers all bytes.
+
+# Append to `order` the indices of the bytes of a T at `offset`, with the bytes of each
+# primitive field reversed.
+function append_swapped_order!(order::Vector{Int}, T::Type, offset::Int)
+    if isprimitivetype(T)
+        append!(order, (offset + sizeof(T)):-1:(offset + 1))
+    else
+        for i in 1:fieldcount(T)
+            append_swapped_order!(order, fieldtype(T, i), offset + Int(fieldoffset(T, i)))
+        end
+    end
+    return order
+end
+
+# The bytes of a struct T, with the bytes of each primitive field reversed. This converts
+# between native byte order and the other byte order, in both directions. The generator
+# only uses the layout of T, not methods that may be added later.
+@generated function swap_fields(::Type{T}, bytes::NTuple{N, UInt8}) where {T, N}
+    order = append_swapped_order!(Int[], T, 0)
+    @assert sort(order) == 1:N
+    return :(tuple($((:(bytes[$i]) for i in order)...)))
+end
+
+# Whether the bytes of a T in native byte order are valid, for a bits type T.
+@inline function is_valid_value(::Type{T}, bytes::NTuple{N, UInt8}) where {T, N}
+    bits_kind(T) isa BitsStorable || return true
+    isprimitivetype(T) || fields_valid(T, bytes) || return false
+    return is_valid_bits(T, bytes)::Bool
+end
+
+# Whether the bytes of each field of the struct T, in native byte order, are valid.
+# The generator only uses the layout of T. `is_valid_value` is called in the generated
+# code, since it calls methods that may be added later.
+@generated function fields_valid(::Type{T}, bytes::NTuple{N, UInt8}) where {T, N}
+    checks = map(1:fieldcount(T)) do i
+        F = fieldtype(T, i)
+        offset = Int(fieldoffset(T, i))
+        field_bytes = :(tuple($((:(bytes[$(offset + j)]) for j in 1:sizeof(F))...)))
+        :(is_valid_value($F, $field_bytes))
+    end
+    return foldr((a, b) -> :($a && $b), checks; init = true)
+end
+
 # Decode a T of kind `kind` at `offset` in `mem`. The caller must ensure that the
 # `bits_encoded_size(T)` bytes are within `mem`.
 @inline function unsafe_decode_bits(
-        ::BitsLoadable, mem::MemoryView, offset::Int, ::Type{T}, e::Endianness
+        kind::Union{BitsLoadable, BitsStorable}, mem::MemoryView, offset::Int, ::Type{T}, e::Endianness
     )::Union{T, DecodeError} where {T}
-    fills_bytes(T) && return unsafe_load_bits(mem, offset, T, e)
-    if loads_as_raw(T)
-        raw = unsafe_load_bits(mem, offset, raw_type(T), e)
-        has_zero_padding(T, raw) || return DecodeError(InvalidData)
-        return Core.Intrinsics.trunc_int(T, raw)
+    return if isprimitivetype(T)
+        unsafe_decode_primitive(kind, mem, offset, T, e)
+    else
+        unsafe_decode_struct(kind, mem, offset, T, e)
     end
-    bytes = unsafe_load_bytes(mem, offset, Val(bits_encoded_size(T)), e)
-    has_zero_padding(T, bytes) || return DecodeError(InvalidData)
-    return from_bytes(T, bytes)
 end
 
-@inline function unsafe_decode_bits(
-        ::BitsStorable, mem::MemoryView, offset::Int, ::Type{T}, e::Endianness
+@inline function unsafe_decode_primitive(
+        kind::Union{BitsLoadable, BitsStorable}, mem::MemoryView, offset::Int, ::Type{T}, e::Endianness
     )::Union{T, DecodeError} where {T}
-    U = raw_type(T)
-    # The bits are checked as a `U`, because they may not be a valid T.
-    raw = if loads_as_raw(T)
-        raw = unsafe_load_bits(mem, offset, U, e)
+    kind isa BitsLoadable && fills_bytes(T) && return unsafe_load_bits(mem, offset, T, e)
+    N = bits_encoded_size(T)
+    if loads_as_raw(T)
+        raw = unsafe_load_bits(mem, offset, uint_of_size(N), e)
         has_zero_padding(T, raw) || return DecodeError(InvalidData)
-        raw
-    else
-        bytes = unsafe_load_bytes(mem, offset, Val(bits_encoded_size(T)), e)
-        has_zero_padding(T, bytes) || return DecodeError(InvalidData)
-        from_bytes(U, bytes)
+        if kind isa BitsStorable
+            # `raw` is in native byte order, so this is a no-op
+            bytes = reinterpret(NTuple{N, UInt8}, raw)
+            is_valid_bits(T, bytes)::Bool || return DecodeError(InvalidData)
+        end
+        return if bit_size(T) == 8 * N
+            Core.Intrinsics.bitcast(T, raw)
+        else
+            Core.Intrinsics.trunc_int(T, raw)
+        end
     end
-    is_valid_bits(T, raw)::Bool || return DecodeError(InvalidData)
-    return if bit_size(T) == 8 * sizeof(U)
-        Core.Intrinsics.bitcast(T, raw)
-    else
-        Core.Intrinsics.trunc_int(T, raw)
+    least_first = unsafe_load_bytes(mem, offset, Val(N), e)
+    has_zero_padding(T, least_first) || return DecodeError(InvalidData)
+    if kind isa BitsStorable
+        bytes = NATIVE_ENDIAN === LittleEndian() ? least_first : reverse(least_first)
+        is_valid_bits(T, bytes)::Bool || return DecodeError(InvalidData)
     end
+    return from_bytes(T, least_first)
+end
+
+@inline function unsafe_decode_struct(
+        kind::Union{BitsLoadable, BitsStorable}, mem::MemoryView, offset::Int, ::Type{T}, e::Endianness
+    )::Union{T, DecodeError} where {T}
+    kind isa BitsLoadable && e === NATIVE_ENDIAN && return unsafe_load_at(mem, T, offset)
+    bytes = unsafe_load_at(mem, NTuple{sizeof(T), UInt8}, offset)
+    if e !== NATIVE_ENDIAN
+        bytes = swap_fields(T, bytes)
+    end
+    if kind isa BitsStorable
+        is_valid_value(T, bytes) || return DecodeError(InvalidData)
+    end
+    return reinterpret(T, bytes)
 end
 
 # Encode x at `offset` in `mem`. The caller must ensure that the
 # `bits_encoded_size(T)` bytes are within `mem`.
 @inline function unsafe_encode_bits!(mem::MutableMemoryView, offset::Int, x::T, e::Endianness) where {T}
-    if fills_bytes(T)
-        unsafe_store_bits(mem, offset, x, e)
+    if isprimitivetype(T)
+        if fills_bytes(T)
+            unsafe_store_bits(mem, offset, x, e)
+        else
+            unsafe_store_bytes!(mem, offset, to_bytes(x, Val(bits_encoded_size(T))), e)
+        end
+    elseif e === NATIVE_ENDIAN
+        unsafe_store_at!(mem, x, offset)
     else
-        unsafe_store_bytes!(mem, offset, to_bytes(x, Val(bits_encoded_size(T))), e)
+        unsafe_store_at!(mem, swap_fields(T, reinterpret(NTuple{sizeof(T), UInt8}, x)), offset)
     end
     return nothing
 end

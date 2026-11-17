@@ -17,7 +17,7 @@ julia> max_encoded_size(Char, UTF8())
 ```
 """
 @inline function max_encoded_size(::Type{T}, enc::Encoding)::Int where {T}
-    return if codec_kind(T, enc) isa NotBits
+    return if codec_kind(T, enc) isa ManualCodec
         codec_max_encoded_size(T, enc)
     else
         bits_encoded_size(T)
@@ -25,13 +25,14 @@ julia> max_encoded_size(Char, UTF8())
 end
 
 """
-    try_decode(
-        mem::MemoryView{UInt8}, [i::Integer,] ::Type{T}, enc::Encoding
-    )::Union{Tuple{T, Int}, DecodeError}
+    try_decode(mem::MemoryView{UInt8}, [i::Integer,] ::Type{T}, enc::Encoding)::Union{T, DecodeError}
 
 Decode a `T` from `mem`, starting at index `i` (default: 1), treating the bytes from `i`
-to the end of `mem` as the complete input.
-Return the value and the number of bytes used, or a [`DecodeError`](@ref).
+to the end of `mem` as the complete input. Return the value, or a
+[`DecodeError`](@ref).
+
+To also get the index after the encoding, e.g. for types whose encodings vary in size,
+use [`try_decode_next`](@ref).
 
 The result is the same as decoding from `mem[i:end]`, but without creating the slice.
 `i` must be in `1:length(mem)+1`, or a `LightBoundsError` is thrown.
@@ -56,10 +57,10 @@ See also: [`decode`](@ref), [`try_load`](@ref)
 # Examples
 ```jldoctest
 julia> try_decode(MemoryView([0x01, 0x02, 0x03]), UInt16, LittleEndian())
-(0x0201, 2)
+0x0201
 
 julia> try_decode(MemoryView([0x01, 0x02, 0x03]), 2, UInt16, LittleEndian())
-(0x0302, 2)
+0x0302
 
 julia> try_decode(MemoryView([0x01]), UInt16, LittleEndian())
 DecodeError(BufferSerde.DecodeErrorKinds.Truncated)
@@ -88,12 +89,125 @@ the maximum length or the end of `mem` is reached. Validity is never checked, so
 overlong encodings, surrogates and truncated sequences decode to a malformed `Char`.
 Therefore, the only possible error is `EndOfInput`, when no bytes remain.
 """
-@inline function try_decode(
+Base.@propagate_inbounds function try_decode(
+        mem::MemoryView{UInt8}, i::Integer, ::Type{T}, enc::Encoding
+    )::Union{T, DecodeError} where {T}
+    (x, _) = @try_return try_decode_sized(mem, i, T, enc)
+    return x
+end
+
+Base.@propagate_inbounds function try_decode(mem::MemoryView{UInt8}, ::Type{T}, enc::Encoding) where {T}
+    return try_decode(mem, 1, T, enc)
+end
+
+"""
+    decode(mem::MemoryView{UInt8}, [i::Integer,] ::Type{T}, enc::Encoding)::T
+
+Like [`try_decode`](@ref), but throw the [`DecodeError`](@ref) instead of returning it.
+Supports `@inbounds` in the same way as `try_decode`.
+
+See also: [`decode_next`](@ref)
+
+# Examples
+```jldoctest
+julia> decode(MemoryView([0x01, 0x02, 0x03]), UInt16, BigEndian())
+0x0102
+
+julia> decode(MemoryView([0x01, 0x02, 0x03]), 2, UInt16, BigEndian())
+0x0203
+
+julia> decode(MemoryView(UInt8[]), UInt16, BigEndian())
+ERROR: DecodeError: End of input: no bytes left to decode
+[...]
+```
+"""
+Base.@propagate_inbounds function decode(
+        mem::MemoryView{UInt8}, i::Integer, ::Type{T}, enc::Encoding
+    )::T where {T}
+    result = try_decode(mem, i, T, enc)
+    result isa DecodeError && throw_decode_error(result)
+    return result
+end
+
+Base.@propagate_inbounds function decode(mem::MemoryView{UInt8}, ::Type{T}, enc::Encoding) where {T}
+    return decode(mem, 1, T, enc)
+end
+
+"""
+    try_decode_next(
+        mem::MemoryView{UInt8}, i::Integer, ::Type{T}, enc::Encoding
+    )::Union{Tuple{T, Int}, DecodeError}
+
+Like [`try_decode`](@ref), but return the value together with the index after its
+encoding, which is where the next value starts. The index is `length(mem) + 1` if the
+encoding ends at the end of `mem`.
+
+This is meant for decoding a sequence of values, in particular of types whose encodings
+vary in size, such as `Char` with [`UTF8`](@ref). Supports `@inbounds` in the same way as
+`try_decode`.
+
+# Examples
+```jldoctest
+julia> mem = MemoryView("aé");
+
+julia> try_decode_next(mem, 1, Char, UTF8())
+('a', 2)
+
+julia> try_decode_next(mem, 2, Char, UTF8())
+('é', 4)
+
+julia> try_decode_next(mem, 4, Char, UTF8())
+DecodeError(BufferSerde.DecodeErrorKinds.EndOfInput)
+```
+"""
+Base.@propagate_inbounds function try_decode_next(
+        mem::MemoryView{UInt8}, i::Integer, ::Type{T}, enc::Encoding
+    )::Union{Tuple{T, Int}, DecodeError} where {T}
+    (x, n) = @try_return try_decode_sized(mem, i, T, enc)
+    return (x, Int(i)::Int + n)
+end
+
+"""
+    decode_next(mem::MemoryView{UInt8}, i::Integer, ::Type{T}, enc::Encoding)::Tuple{T, Int}
+
+Like [`try_decode_next`](@ref), but throw the [`DecodeError`](@ref) instead of returning
+it. Supports `@inbounds` in the same way as [`try_decode`](@ref).
+
+# Examples
+```jldoctest
+julia> function decode_chars(mem::MemoryView{UInt8})
+           chars = Char[]
+           i = 1
+           while i ≤ length(mem)
+               (c, i) = decode_next(mem, i, Char, UTF8())
+               push!(chars, c)
+           end
+           return chars
+       end;
+
+julia> decode_chars(MemoryView("a€!"))
+3-element Vector{Char}:
+ 'a': ASCII/Unicode U+0061 (category Ll: Letter, lowercase)
+ '€': Unicode U+20AC (category Sc: Symbol, currency)
+ '!': ASCII/Unicode U+0021 (category Po: Punctuation, other)
+```
+"""
+Base.@propagate_inbounds function decode_next(
+        mem::MemoryView{UInt8}, i::Integer, ::Type{T}, enc::Encoding
+    )::Tuple{T, Int} where {T}
+    result = try_decode_next(mem, i, T, enc)
+    result isa DecodeError && throw_decode_error(result)
+    return result
+end
+
+# Decode a T from `mem[i:end]`, and return it with the number of bytes used, or a
+# `DecodeError`. The public decoding functions are built on this.
+@inline function try_decode_sized(
         mem::MemoryView{UInt8}, i::Integer, ::Type{T}, enc::Encoding
     )::Union{Tuple{T, Int}, DecodeError} where {T}
     i = Int(i)::Int
     kind = codec_kind(T, enc)
-    if kind isa NotBits
+    if kind isa ManualCodec
         @boundscheck check_start_index(mem, i)
         return codec_try_decode(unsafe_suffix(ImmutableMemoryView(mem), i), T, enc)
     end
@@ -106,43 +220,8 @@ Therefore, the only possible error is `EndOfInput`, when no bytes remain.
     return (x, n)
 end
 
-Base.@propagate_inbounds function try_decode(mem::MemoryView{UInt8}, ::Type{T}, enc::Encoding) where {T}
-    return try_decode(mem, 1, T, enc)
-end
-
 """
-    decode(mem::MemoryView{UInt8}, [i::Integer,] ::Type{T}, enc::Encoding)::Tuple{T, Int}
-
-Like [`try_decode`](@ref), but throw the [`DecodeError`](@ref) instead of returning it.
-Supports `@inbounds` in the same way as `try_decode`.
-
-# Examples
-```jldoctest
-julia> decode(MemoryView([0x01, 0x02, 0x03]), UInt16, BigEndian())
-(0x0102, 2)
-
-julia> decode(MemoryView([0x01, 0x02, 0x03]), 2, UInt16, BigEndian())
-(0x0203, 2)
-
-julia> decode(MemoryView(UInt8[]), UInt16, BigEndian())
-ERROR: DecodeError: End of input: no bytes left to decode
-[...]
-```
-"""
-Base.@propagate_inbounds function decode(
-        mem::MemoryView{UInt8}, i::Integer, ::Type{T}, enc::Encoding
-    )::Tuple{T, Int} where {T}
-    result = try_decode(mem, i, T, enc)
-    result isa DecodeError && throw_decode_error(result)
-    return result
-end
-
-Base.@propagate_inbounds function decode(mem::MemoryView{UInt8}, ::Type{T}, enc::Encoding) where {T}
-    return decode(mem, 1, T, enc)
-end
-
-"""
-    encode!(mem::MutableMemoryView{UInt8}, [i::Integer,] x::T, enc::Encoding)::Union{Nothing, Int}
+    try_encode!(mem::MutableMemoryView{UInt8}, [i::Integer,] x::T, enc::Encoding)::Union{Nothing, Int}
 
 Encode `x` into `mem`, starting at index `i` (default: 1). Return the number of bytes
 written, or `nothing` if the bytes from `i` to the end of `mem` are too few.
@@ -158,31 +237,31 @@ bytes of `mem` from `i` when `nothing` is returned. Bytes before `i` are never w
 In an `@inbounds` context, the caller guarantees that `i ≥ 1`, and that at least
 [`max_encoded_size(T, enc)`](@ref max_encoded_size) bytes remain from `i`. The checks of
 these conditions may then be skipped, and the behaviour is undefined if they don't hold.
-In return, `encode!` never returns `nothing`.
+In return, `try_encode!` never returns `nothing`.
 
 This function is not an extension point: never add methods to it. Implement a codec
 instead, see [`Encoding`](@ref).
 
-See also: [`store`](@ref)
+See also: [`encode!`](@ref), [`store`](@ref)
 
 # Examples
 ```jldoctest
 julia> v = zeros(UInt8, 3);
 
-julia> encode!(MemoryView(v), 0x0102, BigEndian()), v
+julia> try_encode!(MemoryView(v), 0x0102, BigEndian()), v
 (2, UInt8[0x01, 0x02, 0x00])
 
-julia> encode!(MemoryView(v), 2, 0x0304, BigEndian()), v
+julia> try_encode!(MemoryView(v), 2, 0x0304, BigEndian()), v
 (2, UInt8[0x01, 0x03, 0x04])
 
-julia> encode!(MemoryView(v), 0x01020304, BigEndian()) # too short
+julia> try_encode!(MemoryView(v), 0x01020304, BigEndian()) # too short
 ```
 """
-@inline function encode!(
+@inline function try_encode!(
         mem::MutableMemoryView{UInt8}, i::Integer, x::T, enc::Encoding
     )::Union{Nothing, Int} where {T}
     i = Int(i)::Int
-    if codec_kind(T, enc) isa NotBits
+    if codec_kind(T, enc) isa ManualCodec
         @boundscheck check_start_index(mem, i)
         return codec_encode!(unsafe_suffix(mem, i), x, enc)
     end
@@ -195,8 +274,56 @@ julia> encode!(MemoryView(v), 0x01020304, BigEndian()) # too short
     return n
 end
 
+Base.@propagate_inbounds function try_encode!(mem::MutableMemoryView{UInt8}, x, enc::Encoding)
+    return try_encode!(mem, 1, x, enc)
+end
+
+"""
+    encode!(mem::MutableMemoryView{UInt8}, [i::Integer,] x::T, enc::Encoding)::Int
+
+Like [`try_encode!`](@ref), but throw a `LightBoundsError` instead of returning `nothing`
+when the bytes from `i` to the end of `mem` are too few.
+The error reports the indices that the encoding needed, if they are known. Otherwise, it
+reports the indices from `i` to `length(mem) + 1`, since at least one more byte was needed.
+
+In an `@inbounds` context, the caller guarantees the same as for `try_encode!`. Then, the
+checks that would throw may be skipped, and the behaviour is undefined if the guarantees
+don't hold.
+
+# Examples
+```jldoctest
+julia> v = zeros(UInt8, 3);
+
+julia> encode!(MemoryView(v), 2, 0x0102, BigEndian()), v
+(2, UInt8[0x00, 0x01, 0x02])
+
+julia> encode!(MemoryView(v), 2, 0x01020304, BigEndian())
+ERROR: LightBoundsErrors.LightBoundsError: out-of-bounds indexing: `collection[2:5]`, where:
+[...]
+```
+"""
+Base.@propagate_inbounds function encode!(
+        mem::MutableMemoryView{UInt8}, i::Integer, x::T, enc::Encoding
+    )::Int where {T}
+    n = try_encode!(mem, i, x, enc)
+    n === nothing && throw_encode_error(mem, Int(i)::Int, T, enc)
+    return n
+end
+
 Base.@propagate_inbounds function encode!(mem::MutableMemoryView{UInt8}, x, enc::Encoding)
     return encode!(mem, 1, x, enc)
+end
+
+# Throw the error of `encode!` for a T at the valid start index `i`, when `mem` is too
+# short. A hand-written codec doesn't say how many bytes it needed, but at least one more
+# byte than `mem` has. Inlined for the same reason as `check_start_index`.
+@inline function throw_encode_error(mem::MemoryView, i::Int, ::Type{T}, enc::Encoding) where {T}
+    stop = if codec_kind(T, enc) isa ManualCodec
+        length(mem) + 1
+    else
+        i + bits_encoded_size(T) - 1
+    end
+    return @inline throw_lightboundserror(mem, i:stop)
 end
 
 # Whether `i` is a valid start index of `mem`, and at least n bytes remain from it.
@@ -235,9 +362,11 @@ function codec_max_encoded_size end
     )::Union{Tuple{T, Int}, DecodeError}
 
 Extension point of a hand-written codec for the value type `T` and the encoding type
-`E`, see [`Encoding`](@ref). Never call it directly; call [`try_decode`](@ref).
+`E`, see [`Encoding`](@ref). Never call it directly; call [`try_decode`](@ref) or
+[`try_decode_next`](@ref).
 
-Decode a `T` from the start of `mem`, as described for [`try_decode`](@ref).
+Decode a `T` from the start of `mem`, as described for [`try_decode`](@ref), and return
+it with the number of bytes used, `n`, or return a [`DecodeError`](@ref).
 An implementation must follow this contract:
 1. **Pure.** The result depends only on the contents of `mem`, and no reference to
    `mem` is kept.
@@ -258,7 +387,8 @@ function codec_try_decode end
     codec_encode!(mem::MutableMemoryView{UInt8}, x::T, ::E)::Union{Nothing, Int}
 
 Extension point of a hand-written codec for the value type `T` and the encoding type
-`E`, see [`Encoding`](@ref). Never call it directly; call [`encode!`](@ref).
+`E`, see [`Encoding`](@ref). Never call it directly; call [`try_encode!`](@ref) or
+[`encode!`](@ref).
 
 Encode `x` at the start of `mem`, and return the number of bytes written, or `nothing`
 if `mem` is too short. An implementation must follow this contract:

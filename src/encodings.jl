@@ -21,12 +21,12 @@ There are three ways to provide a codec, depending on `T`:
 
 | `T` is                                                          | The owner of `T` implements                    |
 |:--------------------------------------------------------------- |:---------------------------------------------- |
-| A primitive type; every bit pattern is a valid `T`              | `bits_kind(::Type{T}) = BitsLoadable()`        |
-| A primitive type; its bits are its encoding, but some are invalid | `bits_kind(::Type{T}) = BitsStorable()` and [`is_valid_bits`](@ref) |
+| A primitive type or isbits struct; every bit pattern is a valid `T` | `bits_kind(::Type{T}) = BitsLoadable()`        |
+| A primitive type or isbits struct; its bits are its encoding, but some are invalid | `bits_kind(::Type{T}) = BitsStorable()` and [`is_valid_bits`](@ref) |
 | Anything else, or used with other encodings                     | A hand-written codec, see below                |
 
 The first two only apply to [`LittleEndian`](@ref) and [`BigEndian`](@ref), see
-[`bits_kind`](@ref).
+[`BitsKind`](@ref), which also lists the requirements for structs.
 
 A hand-written codec for `T` and an encoding type `E` consists of three methods:
 * [`codec_max_encoded_size(::Type{T}, ::E)`](@ref codec_max_encoded_size)
@@ -102,11 +102,11 @@ See [`try_decode`](@ref) for details.
 julia> encode!(MemoryView(zeros(UInt8, 4)), 'é', UTF8())
 2
 
-julia> decode(MemoryView("€!"), Char, UTF8())
-('€', 3)
+julia> decode_next(MemoryView("€!"), 1, Char, UTF8())
+('€', 4)
 
 julia> decode(MemoryView(b"\\xe2\\x82"), Char, UTF8()) # truncated input: a malformed Char
-('\\xe2\\x82', 2)
+'\\xe2\\x82': Malformed UTF-8 (category Ma: Malformed, bad data)
 ```
 """
 struct UTF8 <: Encoding end
