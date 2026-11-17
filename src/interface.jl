@@ -26,21 +26,27 @@ end
 
 """
     try_decode(
-        mem::MemoryView{UInt8}, ::Type{T}, enc::Encoding
+        mem::MemoryView{UInt8}, [i::Integer,] ::Type{T}, enc::Encoding
     )::Union{Tuple{T, Int}, DecodeError}
 
-Decode a `T` from the start of `mem`, treating `mem` as the complete input.
+Decode a `T` from `mem`, starting at index `i` (default: 1), treating the bytes from `i`
+to the end of `mem` as the complete input.
 Return the value and the number of bytes used, or a [`DecodeError`](@ref).
 
+The result is the same as decoding from `mem[i:end]`, but without creating the slice.
+`i` must be in `1:length(mem)+1`, or a `LightBoundsError` is thrown.
+At `i == length(mem) + 1`, there is nothing to decode.
+
 `mem` may be mutable or immutable. Other types of memory, such as `Vector{UInt8}` or
-`String`, must be converted by the caller, e.g. with `MemoryView(v)`. To decode from an
-offset, slice `mem`, e.g. `try_decode(mem[5:end], UInt16, LittleEndian())`.
+`String`, must be converted by the caller, e.g. with `MemoryView(v)`.
 
 The error kind is:
-* `EndOfInput` if `mem` is empty, unless a `T` can be encoded in zero bytes;
+* `EndOfInput` if no bytes remain, unless a `T` can be encoded in zero bytes;
 * `Truncated` if `mem` ends partway through an encoding, unless the encoding defines a
   meaning for incomplete input, as [`UTF8`](@ref) does;
 * `InvalidData` if the bytes are not a valid encoding.
+
+This function supports `@inbounds`, see the extended help.
 
 This function is not an extension point: never add methods to it. Implement a codec
 instead, see [`Encoding`](@ref).
@@ -52,6 +58,9 @@ See also: [`decode`](@ref), [`try_load`](@ref)
 julia> try_decode(MemoryView([0x01, 0x02, 0x03]), UInt16, LittleEndian())
 (0x0201, 2)
 
+julia> try_decode(MemoryView([0x01, 0x02, 0x03]), 2, UInt16, LittleEndian())
+(0x0302, 2)
+
 julia> try_decode(MemoryView([0x01]), UInt16, LittleEndian())
 DecodeError(BufferSerde.DecodeErrorKinds.Truncated)
 
@@ -60,58 +69,96 @@ DecodeError(BufferSerde.DecodeErrorKinds.InvalidData)
 ```
 
 # Extended help
+## `@inbounds`
+In an `@inbounds` context, the caller guarantees that `i ≥ 1`, and that at least
+[`max_encoded_size(T, enc)`](@ref max_encoded_size) bytes remain from `i`, i.e.
+`length(mem) - i + 1 ≥ max_encoded_size(T, enc)`. The checks of these conditions may
+then be skipped, and the behaviour is undefined if they don't hold.
+Checks of the decoded bytes themselves are never skipped: for example, decoding a `Bool`
+from the byte `0x02` returns an `InvalidData` error also in an `@inbounds` context.
+
+Unlike most uses of `@inbounds`, this skips checks that would return `EndOfInput` and
+`Truncated` errors, besides the check that would throw a `LightBoundsError`.
+
 ## Char and UTF-8
 `try_decode(mem, Char, UTF8())` follows `String` iteration exactly. The lead byte sets
 the maximum length (`00`–`bf` and `f8`–`ff`: 1 byte, `c0`–`df`: 2, `e0`–`ef`: 3,
 `f0`–`f7`: 4), and each following byte is taken while it is a continuation byte, until
 the maximum length or the end of `mem` is reached. Validity is never checked, so
 overlong encodings, surrogates and truncated sequences decode to a malformed `Char`.
-Therefore, the only possible error is `EndOfInput`, for an empty `mem`.
+Therefore, the only possible error is `EndOfInput`, when no bytes remain.
 """
 @inline function try_decode(
-        mem::MemoryView{UInt8}, ::Type{T}, enc::Encoding
+        mem::MemoryView{UInt8}, i::Integer, ::Type{T}, enc::Encoding
     )::Union{Tuple{T, Int}, DecodeError} where {T}
-    mem = ImmutableMemoryView(mem)
+    i = Int(i)::Int
     kind = codec_kind(T, enc)
-    kind isa NotBits && return codec_try_decode(mem, T, enc)
+    if kind isa NotBits
+        @boundscheck check_start_index(mem, i)
+        return codec_try_decode(unsafe_suffix(ImmutableMemoryView(mem), i), T, enc)
+    end
     n = bits_encoded_size(T)
-    length(mem) < n && return short_error(mem)
-    x = @try_return unsafe_decode_bits(kind, mem, 0, T, enc)
+    @boundscheck if !has_bytes(mem, i, n)
+        check_start_index(mem, i)
+        return DecodeError(i > length(mem) ? EndOfInput : Truncated)
+    end
+    x = @try_return unsafe_decode_bits(kind, mem, i - 1, T, enc)
     return (x, n)
 end
 
+Base.@propagate_inbounds function try_decode(mem::MemoryView{UInt8}, ::Type{T}, enc::Encoding) where {T}
+    return try_decode(mem, 1, T, enc)
+end
+
 """
-    decode(mem::MemoryView{UInt8}, ::Type{T}, enc::Encoding)::Tuple{T, Int}
+    decode(mem::MemoryView{UInt8}, [i::Integer,] ::Type{T}, enc::Encoding)::Tuple{T, Int}
 
 Like [`try_decode`](@ref), but throw the [`DecodeError`](@ref) instead of returning it.
+Supports `@inbounds` in the same way as `try_decode`.
 
 # Examples
 ```jldoctest
 julia> decode(MemoryView([0x01, 0x02, 0x03]), UInt16, BigEndian())
 (0x0102, 2)
 
+julia> decode(MemoryView([0x01, 0x02, 0x03]), 2, UInt16, BigEndian())
+(0x0203, 2)
+
 julia> decode(MemoryView(UInt8[]), UInt16, BigEndian())
 ERROR: DecodeError: End of input: no bytes left to decode
 [...]
 ```
 """
-function decode(mem::MemoryView{UInt8}, T::Type, enc::Encoding)
-    result = try_decode(mem, T, enc)
+Base.@propagate_inbounds function decode(
+        mem::MemoryView{UInt8}, i::Integer, ::Type{T}, enc::Encoding
+    )::Tuple{T, Int} where {T}
+    result = try_decode(mem, i, T, enc)
     result isa DecodeError && throw_decode_error(result)
     return result
 end
 
-"""
-    encode!(mem::MutableMemoryView{UInt8}, x::T, enc::Encoding)::Union{Nothing, Int}
+Base.@propagate_inbounds function decode(mem::MemoryView{UInt8}, ::Type{T}, enc::Encoding) where {T}
+    return decode(mem, 1, T, enc)
+end
 
-Encode `x` at the start of `mem`. Return the number of bytes written,
-or `nothing` if `mem` is too short.
+"""
+    encode!(mem::MutableMemoryView{UInt8}, [i::Integer,] x::T, enc::Encoding)::Union{Nothing, Int}
+
+Encode `x` into `mem`, starting at index `i` (default: 1). Return the number of bytes
+written, or `nothing` if the bytes from `i` to the end of `mem` are too few.
+
+`i` must be in `1:length(mem)+1`, or a `LightBoundsError` is thrown.
 
 Other types of memory, such as `Vector{UInt8}`, must be converted by the caller, e.g.
 with `MemoryView(v)`.
 
 Bytes of `mem` beyond the returned number of bytes may also be overwritten, and so may
-bytes of `mem` when `nothing` is returned.
+bytes of `mem` from `i` when `nothing` is returned. Bytes before `i` are never written.
+
+In an `@inbounds` context, the caller guarantees that `i ≥ 1`, and that at least
+[`max_encoded_size(T, enc)`](@ref max_encoded_size) bytes remain from `i`. The checks of
+these conditions may then be skipped, and the behaviour is undefined if they don't hold.
+In return, `encode!` never returns `nothing`.
 
 This function is not an extension point: never add methods to it. Implement a codec
 instead, see [`Encoding`](@ref).
@@ -125,16 +172,50 @@ julia> v = zeros(UInt8, 3);
 julia> encode!(MemoryView(v), 0x0102, BigEndian()), v
 (2, UInt8[0x01, 0x02, 0x00])
 
+julia> encode!(MemoryView(v), 2, 0x0304, BigEndian()), v
+(2, UInt8[0x01, 0x03, 0x04])
+
 julia> encode!(MemoryView(v), 0x01020304, BigEndian()) # too short
 ```
 """
-@inline function encode!(mem::MutableMemoryView{UInt8}, x::T, enc::Encoding)::Union{Nothing, Int} where {T}
-    codec_kind(T, enc) isa NotBits && return codec_encode!(mem, x, enc)
+@inline function encode!(
+        mem::MutableMemoryView{UInt8}, i::Integer, x::T, enc::Encoding
+    )::Union{Nothing, Int} where {T}
+    i = Int(i)::Int
+    if codec_kind(T, enc) isa NotBits
+        @boundscheck check_start_index(mem, i)
+        return codec_encode!(unsafe_suffix(mem, i), x, enc)
+    end
     n = bits_encoded_size(T)
-    length(mem) < n && return nothing
-    unsafe_encode_bits!(mem, 0, x, enc)
+    @boundscheck if !has_bytes(mem, i, n)
+        check_start_index(mem, i)
+        return nothing
+    end
+    unsafe_encode_bits!(mem, i - 1, x, enc)
     return n
 end
+
+Base.@propagate_inbounds function encode!(mem::MutableMemoryView{UInt8}, x, enc::Encoding)
+    return encode!(mem, 1, x, enc)
+end
+
+# Whether `i` is a valid start index of `mem`, and at least n bytes remain from it.
+# For i ≥ 1, `length(mem) - i + 1` can't overflow.
+@inline has_bytes(mem::MemoryView, i::Int, n::Int) = i ≥ 1 && length(mem) - i + 1 ≥ n
+
+# Throw a `LightBoundsError` unless `i` is in `1:length(mem)+1`, the start indices of
+# `mem[i:end]`. Unlike a `BoundsError`, the error holds no reference to `mem`, so the
+# error branch doesn't make `mem` escape. Otherwise, the caller would also have to set up
+# a GC frame for `mem`, on the fast path too, e.g. when it created `mem` from a `Vector`.
+# The `@inline` keeps `mem` from being passed to a non-inlined function.
+@inline function check_start_index(mem::MemoryView, i::Int)
+    ((i - 1) % UInt) > (length(mem) % UInt) && @inline throw_lightboundserror(mem, i)
+    return nothing
+end
+
+# `mem[i:end]`, without checking that `i` is in `1:length(mem)+1`.
+# Unlike slicing, this returns `mem` itself for i == 1, which is constant-folded.
+@inline unsafe_suffix(mem::MemoryView, i::Int) = last(@inbounds split_at(mem, i))
 
 """
     codec_max_encoded_size(::Type{T}, ::E)::Int

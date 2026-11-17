@@ -1,5 +1,6 @@
 [deps]
 BufferIO = "ff366017-094f-4144-bd70-a828a0d67152"
 Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+LightBoundsErrors = "e21c612c-4641-4669-b9c3-3f4360ced9da"
 MemoryViews = "a791c907-b98b-4e44-8f4d-e4c2362c6b2f"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"

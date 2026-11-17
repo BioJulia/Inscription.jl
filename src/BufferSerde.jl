@@ -5,7 +5,8 @@ Load and store primitive values to and from byte arrays and BufferIO's IO types.
 """
 module BufferSerde
 
-using MemoryViews: MemoryViews, MemoryView, ImmutableMemoryView, MutableMemoryView
+using MemoryViews: MemoryViews, MemoryView, ImmutableMemoryView, MutableMemoryView, split_at
+using LightBoundsErrors: throw_lightboundserror
 using BufferIO: BufferIO,
     AbstractBufReader,
     AbstractBufWriter,

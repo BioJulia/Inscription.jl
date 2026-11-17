@@ -6,6 +6,7 @@ using BufferSerde.DecodeErrorKinds: EndOfInput, Truncated, InvalidData
 using BufferIO
 using BufferIO.Testing: BoundedReader, BoundedWriter, ChunkedReader
 using MemoryViews: MemoryView, ImmutableMemoryView, MutableMemoryView
+using LightBoundsErrors: LightBoundsError
 
 const BITS_TYPES = (
     Int8, Int16, Int32, Int64, Int128,
@@ -110,6 +111,41 @@ function BufferSerde.codec_encode!(mem::MutableMemoryView{UInt8}, x::Bool, ::CBo
     mem[1] = x
     return 1
 end
+
+# A codec that reports whether its own `@boundscheck` blocks ran. `@inbounds` at the call
+# of `try_decode` or `encode!` must not reach into the codec.
+struct Probe <: Encoding end
+BufferSerde.codec_max_encoded_size(::Type{Bool}, ::Probe) = 1
+@inline function BufferSerde.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{Bool}, ::Probe)
+    isempty(mem) && return DecodeError(EndOfInput)
+    checked = false
+    @boundscheck checked = true
+    return (checked, 1)
+end
+@inline function BufferSerde.codec_encode!(mem::MutableMemoryView{UInt8}, ::Bool, ::Probe)
+    isempty(mem) && return nothing
+    checked = false
+    @boundscheck checked = true
+    @inbounds mem[1] = checked
+    return 1
+end
+
+# Pairs of a type and an encoding, covering every kind of codec
+const CODEC_CASES = let
+    types = (BITS_TYPES..., Bool, Fruit, Small, Signs, U24, S24, U144)
+    cases = Any[(T, e) for T in types for e in (LittleEndian(), BigEndian())]
+    push!(cases, (Char, UTF8()), (Bool, CBool()))
+    if HAS_NARROW
+        for T in (U22, U5, U30, S30, S12, U29), e in (LittleEndian(), BigEndian())
+            push!(cases, (T, e))
+        end
+    end
+    cases
+end
+
+# Whether `@inbounds` elides `@boundscheck` blocks. `--check-bounds=yes`, which `Pkg.test`
+# uses, keeps them.
+const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
 
 @testset "BufferSerde" begin
 
@@ -706,14 +742,131 @@ end
         @test io.vec == [0x01, 0x00, 0x03, 0x02]
     end
 
+    @testset "Indices" begin
+        # Decoding at an index is decoding from the slice
+        for (T, e) in CODEC_CASES
+            m = max_encoded_size(T, e)
+            for len in 0:(2m + 1), _ in 1:3
+                mem = MemoryView(rand(UInt8, len))
+                for i in 1:(len + 1)
+                    expected = try_decode(mem[i:end], T, e)
+                    @test isequal(try_decode(mem, i, T, e), expected)
+                    @test isequal(try_decode(ImmutableMemoryView(mem), i, T, e), expected)
+                    if expected isa DecodeError
+                        @test_throws DecodeError decode(mem, i, T, e)
+                        continue
+                    end
+                    @test isequal(decode(mem, i, T, e), expected)
+                    # Encoding at an index is encoding into the slice, and doesn't write
+                    # before the index.
+                    x = first(expected)
+                    a = fill(0xaa, len)
+                    b = fill(0xaa, len)
+                    @test encode!(MemoryView(a), i, x, e) == encode!(MemoryView(b)[i:end], x, e)
+                    @test a == b
+                    @test all(==(0xaa), a[1:(i - 1)])
+                end
+            end
+        end
+
+        bytes = [0x01, 0x02, 0x03, 0x04, 0x05]
+        mem = MemoryView(bytes)
+        @test decode(mem, 2, UInt32, BigEndian()) === (0x02030405, 4)
+        @test try_decode(mem, 6, UInt8, BigEndian()) === DecodeError(EndOfInput)
+        @test try_decode(mem, 3, UInt32, BigEndian()) === DecodeError(Truncated)
+        @test try_decode(mem, 6, Char, UTF8()) === DecodeError(EndOfInput)
+        @test encode!(mem, 6, 0x01, BigEndian()) === nothing
+        @test encode!(mem, 3, 0x01020304, BigEndian()) === nothing
+        @test encode!(mem, 6, 'a', UTF8()) === nothing
+        @test bytes == [0x01, 0x02, 0x03, 0x04, 0x05]
+        # Any integer type of index
+        @test decode(mem, UInt8(2), UInt16, LittleEndian()) === (0x0302, 2)
+        @test decode(mem, Int32(4), UInt16, LittleEndian()) === (0x0504, 2)
+        @test decode(mem, big(5), UInt8, LittleEndian()) === (0x05, 1)
+        @test_throws InexactError decode(mem, typemax(UInt), UInt8, LittleEndian())
+
+        # Indices outside 1:length(mem)+1 are out of bounds, for every kind of codec
+        for i in (0, -1, 7, 100, typemin(Int), typemax(Int))
+            for (T, e) in ((UInt8, LittleEndian()), (UInt32, BigEndian()), (Bool, LittleEndian()), (Char, UTF8()))
+                @test_throws LightBoundsError try_decode(mem, i, T, e)
+                @test_throws LightBoundsError decode(mem, i, T, e)
+                @test_throws LightBoundsError encode!(mem, i, T === Char ? 'a' : zero(T), e)
+            end
+            @test_throws LightBoundsError try_decode(MemoryView(UInt8[]), i, UInt8, LittleEndian())
+        end
+        @test bytes == [0x01, 0x02, 0x03, 0x04, 0x05]
+        # Also when empty
+        empty_mem = MemoryView(UInt8[])
+        @test try_decode(empty_mem, 1, UInt8, LittleEndian()) === DecodeError(EndOfInput)
+        @test try_decode(empty_mem, 1, Char, UTF8()) === DecodeError(EndOfInput)
+        @test_throws LightBoundsError try_decode(empty_mem, 2, UInt8, LittleEndian())
+        @test_throws LightBoundsError try_decode(empty_mem, 2, Char, UTF8())
+    end
+
+    @testset "@inbounds" begin
+        mem = MemoryView([0x01, 0x02, 0x03, 0x04, 0x05])
+        # `@inbounds` only has an effect if the call is inlined, so the functions must
+        # specialize on the type.
+        decode_inbounds(mem, i, ::Type{T}, e) where {T} = @inbounds decode(mem, i, T, e)
+        try_decode_inbounds(mem, i, ::Type{T}, e) where {T} = @inbounds try_decode(mem, i, T, e)
+        encode_inbounds!(mem, i, x, e) = @inbounds encode!(mem, i, x, e)
+        start_inbounds(mem, ::Type{T}, e) where {T} = @inbounds decode(mem, T, e)
+        little_inbounds(mem, i) = @inbounds Little.decode(mem, i, UInt16)
+
+        # In bounds, the results are the same as without `@inbounds`
+        for (T, e) in CODEC_CASES, i in 1:(length(mem) + 1 - max_encoded_size(T, e))
+            @test isequal(try_decode_inbounds(mem, i, T, e), try_decode(mem, i, T, e))
+        end
+        @test decode_inbounds(mem, 2, UInt32, BigEndian()) === (0x02030405, 4)
+        @test start_inbounds(mem, UInt16, BigEndian()) === (0x0102, 2)
+        @test little_inbounds(mem, 4) === (0x0504, 2)
+        v = zeros(UInt8, 6)
+        @test encode_inbounds!(MemoryView(v), 3, 0x01020304, BigEndian()) === 4
+        @test v == [0x00, 0x00, 0x01, 0x02, 0x03, 0x04]
+
+        # The data is still validated
+        @test try_decode_inbounds(MemoryView([0x02]), 1, Bool, LittleEndian()) === DecodeError(InvalidData)
+        @test try_decode_inbounds(MemoryView([0x00, 0x00]), 1, Fruit, LittleEndian()) === DecodeError(InvalidData)
+
+        # The checks of a hand-written codec are its own, and always run
+        @test try_decode(MemoryView([0x00]), Bool, Probe()) === (true, 1)
+        @test try_decode_inbounds(MemoryView([0x00]), 1, Bool, Probe()) === (true, 1)
+        v = zeros(UInt8, 1)
+        @test encode_inbounds!(MemoryView(v), 1, false, Probe()) === 1
+        @test v == [0x01]
+        # `store` skips its redundant length check, but not those of a codec
+        io = VecWriter()
+        @test store(io, false, Probe()) == 1
+        @test io.vec == [0x01]
+
+        if ELIDES_BOUNDSCHECKS
+            # The length checks are skipped. This breaks the contract of `@inbounds`, which
+            # is only memory-safe here because the views are within a larger memory.
+            backing = MemoryView([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08])
+            short = backing[3:4]
+            @test try_decode(short, 2, UInt32, BigEndian()) === DecodeError(Truncated)
+            @test try_decode_inbounds(short, 2, UInt32, BigEndian()) === (0x04050607, 4)
+            @test decode_inbounds(short, 3, UInt16, BigEndian()) === (0x0506, 2)
+            @test start_inbounds(short, UInt32, LittleEndian()) === (0x06050403, 4)
+            @test little_inbounds(short, 2) === (0x0504, 2)
+            @test encode!(backing[1:2], 2, 0xaabbccdd, BigEndian()) === nothing
+            @test encode_inbounds!(backing[1:2], 2, 0xaabbccdd, BigEndian()) === 4
+            @test collect(backing) == [0x01, 0xaa, 0xbb, 0xcc, 0xdd, 0x06, 0x07, 0x08]
+        end
+    end
+
     @testset "Little and Big" begin
         for (M, E) in ((Little, LittleEndian()), (Big, BigEndian()))
             bytes = [0x01, 0x02, 0x03, 0x04, 0x05]
             @test M.try_decode(MemoryView(bytes), UInt32) === try_decode(MemoryView(bytes), UInt32, E)
             @test M.decode(MemoryView(bytes), UInt16) === decode(MemoryView(bytes), UInt16, E)
+            @test M.try_decode(MemoryView(bytes), 2, UInt32) === try_decode(MemoryView(bytes), 2, UInt32, E)
+            @test M.decode(MemoryView(bytes), 4, UInt16) === decode(MemoryView(bytes), 4, UInt16, E)
             a = zeros(UInt8, 4)
             b = zeros(UInt8, 4)
             @test M.encode!(MemoryView(a), 0x0102) == encode!(MemoryView(b), 0x0102, E)
+            @test a == b
+            @test M.encode!(MemoryView(a), 3, 0x0304) == encode!(MemoryView(b), 3, 0x0304, E)
             @test a == b
             @test M.load(CursorReader(bytes), UInt32) === load(CursorReader(bytes), UInt32, E)
             @test M.try_load(CursorReader(bytes), UInt64) === DecodeError(Truncated)
@@ -778,6 +931,18 @@ end
         store_loop(io, 1)
         empty!(io.vec)
         @test (@allocated store_loop(io, 900)) == 0
+        function sum_indexed(mem)
+            s = UInt64(0)
+            i = 1
+            while i ≤ length(mem) - 3
+                s += @inbounds first(decode(mem, i, UInt32, LittleEndian()))
+                s += first(decode(mem, i, UInt32, BigEndian()))
+                i += 4
+            end
+            return s
+        end
+        sum_indexed(ImmutableMemoryView(data))
+        @test (@allocated sum_indexed(ImmutableMemoryView(data))) == 0
         bulk_allocs(dst, mem) = @allocated decode_into!(dst, mem, BigEndian())
         dst = MemoryView(zeros(UInt32, 250))
         mem = ImmutableMemoryView(data)

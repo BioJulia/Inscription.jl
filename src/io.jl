@@ -118,7 +118,9 @@ julia> io.vec
     if length(buffer) < max_encoded_size(T, enc)
         buffer = @noinline write_buffer(io, max_encoded_size(T, enc))
     end
-    n = encode!(buffer, x, enc)::Int # guaranteed for codecs of bits types, and by the contract of `codec_encode!`
+    # The buffer holds at least `max_encoded_size` bytes, so encoding succeeds, also by the
+    # contract of `codec_encode!`.
+    n = (@inbounds encode!(buffer, x, enc))::Int
     @inbounds consume(io, n)
     return n
 end

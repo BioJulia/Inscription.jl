@@ -131,11 +131,6 @@ macro try_return(expr)
     end
 end
 
-# Error for a fixed-size value that doesn't fit in `mem`.
-function short_error(mem::ImmutableMemoryView{UInt8})::DecodeError
-    return DecodeError(isempty(mem) ? EndOfInput : Truncated)
-end
-
 # Throw `e`. Outlined, because throwing boxes the isbits `DecodeError`, which would
 # otherwise be done at every call site that inlines the caller.
 @noinline throw_decode_error(e::DecodeError) = throw(e)
