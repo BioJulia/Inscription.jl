@@ -1,9 +1,9 @@
 """
-    module BufferSerde
+    module BitScribbling
 
 Load and store primitive values to and from byte arrays and BufferIO's IO types.
 """
-module BufferSerde
+module BitScribbling
 
 using MemoryViews: MemoryViews, MemoryView, ImmutableMemoryView, MutableMemoryView, split_at
 using LightBoundsErrors: throw_lightboundserror
@@ -39,6 +39,7 @@ export Encoding,
     encode_into!,
     load_into!,
     load_all!,
+    load!,
     store_all
 
 public Little,
@@ -61,6 +62,7 @@ include("bits.jl")
 include("utf8.jl")
 include("io.jl")
 include("bulk.jl")
+include("memory.jl")
 include("convenience.jl")
 
-end # module BufferSerde
+end # module BitScribbling

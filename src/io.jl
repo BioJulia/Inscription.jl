@@ -31,13 +31,13 @@ julia> try_load(io, UInt16, LittleEndian())
 0x0201
 
 julia> try_load(io, UInt16, LittleEndian()) # nothing is consumed
-DecodeError(BufferSerde.DecodeErrorKinds.Truncated)
+DecodeError(BitScribbling.DecodeErrorKinds.Truncated)
 
 julia> try_load(io, UInt8, LittleEndian())
 0x03
 
 julia> try_load(io, UInt8, LittleEndian())
-DecodeError(BufferSerde.DecodeErrorKinds.EndOfInput)
+DecodeError(BitScribbling.DecodeErrorKinds.EndOfInput)
 ```
 """
 @inline function try_load(io::AbstractBufReader, ::Type{T}, enc::Encoding)::Union{T, DecodeError} where {T}

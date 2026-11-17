@@ -1,4 +1,5 @@
 [deps]
+BitScribbling = "bbfcd723-da14-4e8b-b7cd-e1801694cbd7"
 BufferIO = "ff366017-094f-4144-bd70-a828a0d67152"
 Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
 LightBoundsErrors = "e21c612c-4641-4669-b9c3-3f4360ced9da"

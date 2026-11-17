@@ -33,8 +33,20 @@ A hand-written codec for `T` and an encoding type `E` consists of three methods:
 * [`codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{T}, ::E)`](@ref codec_try_decode)
 * [`codec_encode!(mem::MutableMemoryView{UInt8}, x::T, ::E)`](@ref codec_encode!)
 
-`E` may be an abstract type, such as [`Endianness`](@ref) or `Encoding`. A codec must be
-defined by the owner of either `T` or `E`, so as not to commit type piracy.
+A codec must be defined by the owner of either `T` or `E`, so as not to commit type
+piracy.
+
+`E` must be a concrete encoding type, such as `LittleEndian` or `UTF8`, never an abstract
+type or a union such as `Encoding` or [`Endianness`](@ref). To support several
+encodings, define the methods for each of them, e.g. in a loop over the encoding types.
+`T`, on the other hand, may be abstract.
+
+This rule prevents method ambiguities between the codecs of different owners. For
+example, the owner of an encoding `E` may define a codec for all `T <: Integer`, and the
+owner of `MyInt <: Integer` may define one for `MyInt` with `E`. Since both methods are
+for the same concrete `E`, the one for `MyInt` is more specific, and is chosen. If the
+owner of `MyInt` had defined its codec for all encodings instead, neither method would be
+more specific, and calls would throw an ambiguity error.
 
 ## Codecs provided by this package
 * `Char` with `UTF8()`.

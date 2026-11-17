@@ -1,14 +1,14 @@
 """
-    decode_into!(
-        dst::MutableMemoryView{T}, src::MemoryView{UInt8}, enc::Encoding
-    )::Tuple{Int, Int}
+    decode_into!(dst, src, enc::Encoding)::Tuple{Int, Int}
 
 Decode elements from the start of the bytes `src` into `dst`, until `dst` is full or
 the next element fails to decode. Return the number of elements decoded, and the number
 of bytes of `src` used. `src` is treated as the complete input, as in
 [`try_decode`](@ref).
 
-`dst` and `src` must not overlap.
+`dst` is mutable memory of elements, and `src` memory of bytes, either as `MemoryView`s
+or as other memory that `MemoryView` can view, such as `Vector`s, see
+[`try_decode`](@ref). They must not overlap.
 
 To learn why decoding stopped before `dst` was full, call `try_decode` at the index after
 the bytes used.
@@ -69,7 +69,7 @@ end
     while n_elements < length(dst)
         rest = @inbounds src[(n_bytes + 1):end]
         length(rest) < min_remaining && break
-        result = codec_try_decode(rest, T, enc)
+        result = call_codec_try_decode(rest, T, enc)
         result isa DecodeError && break
         (x, n) = result
         n_elements += 1
@@ -96,16 +96,16 @@ end
 end
 
 """
-    encode_into!(
-        dst::MutableMemoryView{UInt8}, src::MemoryView{T}, enc::Encoding
-    )::Tuple{Int, Int}
+    encode_into!(dst, src, enc::Encoding)::Tuple{Int, Int}
 
 Encode elements of `src` into the start of the bytes `dst`, until `src` is exhausted or
 `dst` has no room for the next element. Return the number of elements encoded, and the
 number of bytes written.
 
-`dst` and `src` must not overlap. Bytes of `dst` after the returned number of bytes may
-be overwritten.
+`dst` is mutable memory of bytes, and `src` memory of elements, either as `MemoryView`s
+or as other memory that `MemoryView` can view, such as `Vector`s, see
+[`try_decode`](@ref). They must not overlap. Bytes of `dst` after the returned number of
+bytes are not written.
 
 With an [`Endianness`](@ref) encoding, types whose [`bits_kind`](@ref) is
 [`BitsLoadable`](@ref) or [`BitsStorable`](@ref) are copied with `memcpy`, or a
@@ -148,7 +148,7 @@ function encode_into!(
     n_bytes = 0
     for n_elements in 0:(length(src) - 1)
         x = @inbounds src[n_elements + 1]
-        n = codec_encode!((@inbounds dst[(n_bytes + 1):end]), x, enc)
+        n = call_codec_encode!((@inbounds dst[(n_bytes + 1):end]), x, enc)
         n === nothing && return (n_elements, n_bytes)
         n_bytes += n
     end
@@ -172,10 +172,11 @@ end
 end
 
 """
-    load_into!(io::AbstractBufReader, dst::MutableMemoryView, enc::Encoding)::Int
+    load_into!(io::AbstractBufReader, dst, enc::Encoding)::Int
 
 Load elements from `io` into the start of `dst`, and return the number of elements
-loaded.
+loaded. `dst` is a `MutableMemoryView`, or other mutable memory that `MemoryView` can
+view, such as a `Vector`, see [`try_decode`](@ref).
 
 Load at least one element, unless `dst` is empty, `io` is EOF, or the next element in
 `io` fails to load. Each element is loaded all-or-nothing, as in [`try_load`](@ref):
@@ -185,7 +186,7 @@ So a following `try_load(io, T, enc)` reports why.
 Like `try_load`, throw an `IOError` of kind `BufferTooShort` if the buffer capacity of
 `io` is smaller than [`max_encoded_size(T, enc)`](@ref max_encoded_size).
 
-See also: [`load_all!`](@ref), [`decode_into!`](@ref)
+See also: [`load_all!`](@ref), [`load!`](@ref), [`decode_into!`](@ref)
 
 # Examples
 ```jldoctest
@@ -200,7 +201,7 @@ julia> load_into!(io, MemoryView(dst), BigEndian())
 0
 
 julia> try_load(io, UInt16, BigEndian())
-DecodeError(BufferSerde.DecodeErrorKinds.Truncated)
+DecodeError(BitScribbling.DecodeErrorKinds.Truncated)
 ```
 """
 function load_into!(io::AbstractBufReader, dst::MutableMemoryView{T}, enc::Encoding)::Int where {T}
@@ -217,11 +218,13 @@ function load_into!(io::AbstractBufReader, dst::MutableMemoryView{T}, enc::Encod
 end
 
 """
-    load_all!(io::AbstractBufReader, dst::MutableMemoryView, enc::Encoding)::Int
+    load_all!(io::AbstractBufReader, dst, enc::Encoding)::Int
 
 Load elements from `io` into `dst` until `dst` is full, `io` is EOF, or the next element
 fails to load, and return the number of elements loaded.
 Elements are loaded all-or-nothing, as in [`load_into!`](@ref).
+
+To throw an error unless `dst` is filled, use [`load!`](@ref).
 
 # Examples
 ```jldoctest
@@ -245,9 +248,66 @@ function load_all!(io::AbstractBufReader, dst::MutableMemoryView, enc::Encoding)
 end
 
 """
-    store_all(io::AbstractBufWriter, src::MemoryView, enc::Encoding)::Int
+    load!(io::AbstractBufReader, dst, enc::Encoding)
 
-Store all elements of `src` into `io`, and return the number of bytes written.
+Load elements from `io` until `dst` is full, and return `dst`. Like for
+[`load_into!`](@ref), `dst` may be e.g. a `MutableMemoryView` or a `Vector`. If an element fails to
+load, throw a [`DecodeError`](@ref).
+
+The elements are loaded all-or-nothing, as in [`load_into!`](@ref). So when `load!`
+throws, the elements before the failing one have been consumed from `io` and written to
+the start of `dst`, and nothing of the failing element has been consumed.
+
+The error is that of the failing element, as [`try_load`](@ref) reports it. So if `io`
+ends between two elements, the error is `EndOfInput`, also when some elements were
+loaded, and `Truncated` means that `io` ended partway through an element. This is like
+`read!` from Base, which throws an `EOFError` in both cases.
+
+Like `try_load`, throw an `IOError` of kind `BufferTooShort` if the buffer capacity of
+`io` is smaller than [`max_encoded_size(T, enc)`](@ref max_encoded_size).
+
+See also: [`load_all!`](@ref), [`load`](@ref)
+
+# Examples
+```jldoctest
+julia> io = CursorReader([0x00, 0x01, 0x00, 0x02, 0x00]);
+
+julia> dst = zeros(UInt16, 2);
+
+julia> load!(io, dst, BigEndian())
+2-element Vector{UInt16}:
+ 0x0001
+ 0x0002
+
+julia> load!(io, dst, BigEndian())
+ERROR: DecodeError: Truncated input: the input ended partway through an encoded value
+[...]
+```
+"""
+function load!(io::AbstractBufReader, dst::MutableMemoryView{T}, enc::Encoding)::MutableMemoryView{T} where {T}
+    rest = dst
+    while !isempty(rest)
+        n = load_into!(io, rest, enc)
+        if iszero(n)
+            # `load_into!` loads nothing only if the next element fails to load, so this
+            # gets the error. If it loads an element anyway, e.g. because the codec is
+            # not pure, use the element.
+            result = try_load(io, T, enc)
+            result isa DecodeError && throw_decode_error(result)
+            @inbounds rest[1] = result
+            n = 1
+        end
+        rest = @inbounds rest[(n + 1):end]
+    end
+    return dst
+end
+
+"""
+    store_all(io::AbstractBufWriter, src, enc::Encoding)::Int
+
+Store all elements of `src` into `io`, and return the number of bytes written. `src` is a
+`MemoryView`, or other memory that `MemoryView` can view, such as a `Vector`, see
+[`try_decode`](@ref).
 
 Like [`store`](@ref), throw an `IOError` of kind `BufferTooShort` if `io` can't
 provide a buffer of [`max_encoded_size(T, enc)`](@ref max_encoded_size) bytes.

@@ -1,8 +1,8 @@
 using Test
-using BufferSerde
-using BufferSerde: DecodeErrorKinds, Little, Big
-using BufferSerde: bits_kind, BitsLoadable, BitsStorable, ManualCodec, is_valid_bits, as_unsigned
-using BufferSerde.DecodeErrorKinds: EndOfInput, Truncated, InvalidData
+using BitScribbling
+using BitScribbling: DecodeErrorKinds, Little, Big
+using BitScribbling: bits_kind, BitsLoadable, BitsStorable, ManualCodec, is_valid_bits, as_unsigned
+using BitScribbling.DecodeErrorKinds: EndOfInput, Truncated, InvalidData
 using BufferIO
 using BufferIO.Testing: BoundedReader, BoundedWriter, ChunkedReader
 using MemoryViews: MemoryView, ImmutableMemoryView, MutableMemoryView
@@ -37,29 +37,29 @@ end
 # Primitive types of odd sizes. Since Julia 1.14, their size in memory is rounded up to a
 # power of two bytes, but they are encoded in the bytes their bits need.
 primitive type U24 24 end
-BufferSerde.bits_kind(::Type{U24}) = BitsLoadable()
+BitScribbling.bits_kind(::Type{U24}) = BitsLoadable()
 primitive type U144 144 end
-BufferSerde.bits_kind(::Type{U144}) = BitsLoadable()
+BitScribbling.bits_kind(::Type{U144}) = BitsLoadable()
 # The top bit must be zero
 primitive type S24 24 end
-BufferSerde.bits_kind(::Type{S24}) = BitsStorable()
-BufferSerde.is_valid_bits(::Type{S24}, bytes::NTuple{3, UInt8}) = as_unsigned(bytes) < 0x00800000
+BitScribbling.bits_kind(::Type{S24}) = BitsStorable()
+BitScribbling.is_valid_bits(::Type{S24}, bytes::NTuple{3, UInt8}) = as_unsigned(bytes) < 0x00800000
 # Wider than the largest unsigned integer. The top bit must be zero.
 primitive type S144 144 end
-BufferSerde.bits_kind(::Type{S144}) = BitsStorable()
-function BufferSerde.is_valid_bits(::Type{S144}, bytes::NTuple{18, UInt8})
+BitScribbling.bits_kind(::Type{S144}) = BitsStorable()
+function BitScribbling.is_valid_bits(::Type{S144}, bytes::NTuple{18, UInt8})
     top = NATIVE_ENDIAN === LittleEndian() ? bytes[18] : bytes[1]
     return top < 0x80
 end
 # BitsStorable, but doesn't implement `is_valid_bits`
 primitive type NoCheck16 16 end
-BufferSerde.bits_kind(::Type{NoCheck16}) = BitsStorable()
+BitScribbling.bits_kind(::Type{NoCheck16}) = BitsStorable()
 
 # The trait can't be declared for types that are neither primitive types nor isbits structs
 struct Boxed
     x::Vector{UInt8}
 end
-BufferSerde.bits_kind(::Type{Boxed}) = BitsLoadable()
+BitScribbling.bits_kind(::Type{Boxed}) = BitsLoadable()
 
 # The low 128 bits of a primitive value, as an integer
 function low_bits(x::T) where {T}
@@ -79,45 +79,50 @@ const HAS_NARROW = VERSION ≥ v"1.14.0-"
 if HAS_NARROW
     @eval begin
         primitive type U22 22 end
-        BufferSerde.bits_kind(::Type{U22}) = BitsLoadable()
+        BitScribbling.bits_kind(::Type{U22}) = BitsLoadable()
         primitive type U5 5 end
-        BufferSerde.bits_kind(::Type{U5}) = BitsLoadable()
+        BitScribbling.bits_kind(::Type{U5}) = BitsLoadable()
         # Encoded in 4 bytes, so loaded as a UInt32
         primitive type U30 30 end
-        BufferSerde.bits_kind(::Type{U30}) = BitsLoadable()
+        BitScribbling.bits_kind(::Type{U30}) = BitsLoadable()
         # Encoded in 4 bytes, so loaded as a UInt32. The top bit must be zero.
         primitive type S30 30 end
-        BufferSerde.bits_kind(::Type{S30}) = BitsStorable()
-        BufferSerde.is_valid_bits(::Type{S30}, bytes::NTuple{4, UInt8}) = as_unsigned(bytes) < 0x20000000
+        BitScribbling.bits_kind(::Type{S30}) = BitsStorable()
+        BitScribbling.is_valid_bits(::Type{S30}, bytes::NTuple{4, UInt8}) = as_unsigned(bytes) < 0x20000000
         # All ones is invalid
         primitive type S12 12 end
-        BufferSerde.bits_kind(::Type{S12}) = BitsStorable()
-        BufferSerde.is_valid_bits(::Type{S12}, bytes::NTuple{2, UInt8}) = as_unsigned(bytes) != 0x0fff
+        BitScribbling.bits_kind(::Type{S12}) = BitsStorable()
+        BitScribbling.is_valid_bits(::Type{S12}, bytes::NTuple{2, UInt8}) = as_unsigned(bytes) != 0x0fff
 
         # The design's example of a hand-written codec for a narrow type
         primitive type U29 29 end
         U29(x::UInt32) = Core.Intrinsics.trunc_int(U29, x)
         Base.UInt32(x::U29) = Core.Intrinsics.zext_int(UInt32, x)
-        BufferSerde.codec_max_encoded_size(::Type{U29}, ::Endianness) = 4
-        function BufferSerde.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{U29}, e::Endianness)
-            raw = @try_return try_decode(mem, UInt32, e)
-            raw > 0x1fffffff && return DecodeError(InvalidData)
-            return (U29(raw), 4)
-        end
-        function BufferSerde.codec_encode!(mem::MutableMemoryView{UInt8}, x::U29, e::Endianness)
-            return try_encode!(mem, UInt32(x), e)
+    end
+    # Codecs are defined for concrete encoding types only, so one per byte order
+    for E in (LittleEndian, BigEndian)
+        @eval begin
+            BitScribbling.codec_max_encoded_size(::Type{U29}, ::$E) = 4
+            function BitScribbling.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{U29}, e::$E)
+                raw = @try_return try_decode(mem, UInt32, e)
+                raw > 0x1fffffff && return DecodeError(InvalidData)
+                return (U29(raw), 4)
+            end
+            function BitScribbling.codec_encode!(mem::MutableMemoryView{UInt8}, x::U29, e::$E)
+                return try_encode!(mem, UInt32(x), e)
+            end
         end
     end
 end
 
 # A custom encoding defined by a format package
 struct CBool <: Encoding end
-BufferSerde.codec_max_encoded_size(::Type{Bool}, ::CBool) = 1
-function BufferSerde.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{Bool}, ::CBool)
+BitScribbling.codec_max_encoded_size(::Type{Bool}, ::CBool) = 1
+function BitScribbling.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{Bool}, ::CBool)
     isempty(mem) && return DecodeError(EndOfInput)
     return (!iszero(mem[1]), 1)
 end
-function BufferSerde.codec_encode!(mem::MutableMemoryView{UInt8}, x::Bool, ::CBool)
+function BitScribbling.codec_encode!(mem::MutableMemoryView{UInt8}, x::Bool, ::CBool)
     isempty(mem) && return nothing
     mem[1] = x
     return 1
@@ -126,20 +131,34 @@ end
 # A codec that reports whether its own `@boundscheck` blocks ran. `@inbounds` at the call
 # of `try_decode` or `encode!` must not reach into the codec.
 struct Probe <: Encoding end
-BufferSerde.codec_max_encoded_size(::Type{Bool}, ::Probe) = 1
-@inline function BufferSerde.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{Bool}, ::Probe)
+BitScribbling.codec_max_encoded_size(::Type{Bool}, ::Probe) = 1
+@inline function BitScribbling.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{Bool}, ::Probe)
     isempty(mem) && return DecodeError(EndOfInput)
     checked = false
     @boundscheck checked = true
     return (checked, 1)
 end
-@inline function BufferSerde.codec_encode!(mem::MutableMemoryView{UInt8}, ::Bool, ::Probe)
+@inline function BitScribbling.codec_encode!(mem::MutableMemoryView{UInt8}, ::Bool, ::Probe)
     isempty(mem) && return nothing
     checked = false
     @boundscheck checked = true
     @inbounds mem[1] = checked
     return 1
 end
+
+# A codec that breaks its contract, by returning byte counts out of range
+struct Liar <: Encoding end
+BitScribbling.codec_max_encoded_size(::Type{<:Union{Int8, Int16, UInt8}}, ::Liar) = 2
+# More bytes than `mem` has
+BitScribbling.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{Int8}, ::Liar) = (Int8(0), length(mem) + 1)
+BitScribbling.codec_encode!(mem::MutableMemoryView{UInt8}, ::Int8, ::Liar) = length(mem) + 1
+# A negative count
+BitScribbling.codec_try_decode(::ImmutableMemoryView{UInt8}, ::Type{Int16}, ::Liar) = (Int16(0), -1)
+BitScribbling.codec_encode!(::MutableMemoryView{UInt8}, ::Int16, ::Liar) = -1
+# More bytes than `max_encoded_size`, but within `mem`: a bug, but no undefined behaviour,
+# so it's not caught
+BitScribbling.codec_try_decode(::ImmutableMemoryView{UInt8}, ::Type{UInt8}, ::Liar) = (0x00, 3)
+BitScribbling.codec_encode!(::MutableMemoryView{UInt8}, ::UInt8, ::Liar) = 3
 
 # Structs that opt in
 struct Header
@@ -148,22 +167,22 @@ struct Header
     flags::UInt8
     kind::UInt8
 end
-BufferSerde.bits_kind(::Type{Header}) = BitsLoadable()
+BitScribbling.bits_kind(::Type{Header}) = BitsLoadable()
 struct Nested
     header::Header
     x::Float32
     y::Int16
     z::Int16
 end
-BufferSerde.bits_kind(::Type{Nested}) = BitsLoadable()
+BitScribbling.bits_kind(::Type{Nested}) = BitsLoadable()
 # The fields are checked, and then that the fruit is `apple` unless `on`
 struct Flagged
     on::Bool
     other::UInt8
     fruit::Fruit
 end
-BufferSerde.bits_kind(::Type{Flagged}) = BitsStorable()
-function BufferSerde.is_valid_bits(::Type{Flagged}, bytes::NTuple{4, UInt8})
+BitScribbling.bits_kind(::Type{Flagged}) = BitsStorable()
+function BitScribbling.is_valid_bits(::Type{Flagged}, bytes::NTuple{4, UInt8})
     x = reinterpret(Flagged, bytes)
     return x.on || x.fruit === apple
 end
@@ -171,25 +190,25 @@ struct Outer
     a::Flagged
     b::Flagged
 end
-BufferSerde.bits_kind(::Type{Outer}) = BitsStorable()
-BufferSerde.is_valid_bits(::Type{Outer}, ::NTuple{8, UInt8}) = true
+BitScribbling.bits_kind(::Type{Outer}) = BitsStorable()
+BitScribbling.is_valid_bits(::Type{Outer}, ::NTuple{8, UInt8}) = true
 struct Empty end
-BufferSerde.bits_kind(::Type{Empty}) = BitsLoadable()
+BitScribbling.bits_kind(::Type{Empty}) = BitsLoadable()
 
 # Structs that can't be bits types
 struct Padded
     a::UInt8
     b::UInt32
 end
-BufferSerde.bits_kind(::Type{Padded}) = BitsLoadable()
+BitScribbling.bits_kind(::Type{Padded}) = BitsLoadable()
 struct LoadableWithBool
     a::Bool
 end
-BufferSerde.bits_kind(::Type{LoadableWithBool}) = BitsLoadable()
+BitScribbling.bits_kind(::Type{LoadableWithBool}) = BitsLoadable()
 struct WithChar
     c::Char
 end
-BufferSerde.bits_kind(::Type{WithChar}) = BitsLoadable()
+BitScribbling.bits_kind(::Type{WithChar}) = BitsLoadable()
 # Doesn't opt in
 struct Plain
     x::UInt32
@@ -197,17 +216,71 @@ end
 struct WithPlain
     p::Plain
 end
-BufferSerde.bits_kind(::Type{WithPlain}) = BitsLoadable()
+BitScribbling.bits_kind(::Type{WithPlain}) = BitsLoadable()
 struct WithPadded
     p::Padded
 end
-BufferSerde.bits_kind(::Type{WithPadded}) = BitsLoadable()
+BitScribbling.bits_kind(::Type{WithPadded}) = BitsLoadable()
+# Has padding on some platforms only: `b` follows 4 bytes, and is aligned to 8 on x86-64
+struct Misaligned
+    a::UInt32
+    b::UInt64
+end
+BitScribbling.bits_kind(::Type{Misaligned}) = BitsLoadable()
+# Its size, 12, is not a multiple of 8
+struct TrailingPadding
+    a::UInt64
+    b::UInt32
+end
+BitScribbling.bits_kind(::Type{TrailingPadding}) = BitsLoadable()
+# `h` follows 2 bytes, but contains a `UInt32`
+struct MisalignedNested
+    a::UInt16
+    h::Header
+end
+BitScribbling.bits_kind(::Type{MisalignedNested}) = BitsLoadable()
+# No padding on x86-64, where `U256` is aligned to 16 bytes, but a platform could align it
+# to 32 bytes, its size
+primitive type U256 256 end
+BitScribbling.bits_kind(::Type{U256}) = BitsLoadable()
+struct WithU256
+    a::UInt128
+    b::U256
+end
+BitScribbling.bits_kind(::Type{WithU256}) = BitsLoadable()
+# Widths that are not powers of two are rejected on every Julia version, also where the
+# bits of a `U24` fill its 3 bytes
+struct WithU24
+    x::U24
+end
+BitScribbling.bits_kind(::Type{WithU24}) = BitsLoadable()
+# Accepted: ordered from largest to smallest, or with a field for the padding
+struct Ordered
+    b::UInt64
+    a::UInt32
+    c::UInt16
+    d::UInt8
+    e::UInt8
+end
+BitScribbling.bits_kind(::Type{Ordered}) = BitsLoadable()
+struct ExplicitPadding
+    a::UInt32
+    pad::UInt32
+    b::UInt64
+end
+BitScribbling.bits_kind(::Type{ExplicitPadding}) = BitsLoadable()
+struct WithU256Aligned
+    b::U256
+    a::UInt128
+    c::UInt128
+end
+BitScribbling.bits_kind(::Type{WithU256Aligned}) = BitsLoadable()
 if HAS_NARROW
     @eval begin
         struct WithNarrow
             x::U30
         end
-        BufferSerde.bits_kind(::Type{WithNarrow}) = BitsLoadable()
+        BitScribbling.bits_kind(::Type{WithNarrow}) = BitsLoadable()
     end
 end
 
@@ -228,7 +301,7 @@ end
 # uses, keeps them.
 const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
 
-@testset "BufferSerde" begin
+@testset "BitScribbling" begin
 
     @testset "Encodings" begin
         @test NATIVE_ENDIAN === (ENDIAN_BOM == 0x04030201 ? LittleEndian() : BigEndian())
@@ -315,21 +388,22 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         @test_throws DecodeError decode(MemoryView([0x01]), UInt16, BigEndian())
         @test_throws DecodeError decode_next(MemoryView([0x01]), 1, UInt16, BigEndian())
 
-        # Accepts memory views of either mutability, and only memory views
+        # Accepts memory views of either mutability, and memory they can view
         @test try_decode(ImmutableMemoryView([0x01, 0x02]), UInt16, BigEndian()) === 0x0102
         @test try_decode(MemoryView([0x01, 0x02]), UInt16, BigEndian()) === 0x0102
         @test try_decode(MemoryView(b"\x01\x02"), UInt16, BigEndian()) === 0x0102
         @test decode(MemoryView("\x01\x02"), UInt16, BigEndian()) === 0x0102
-        @test_throws MethodError try_decode([0x01, 0x02], UInt16, BigEndian())
-        @test_throws MethodError decode([0x01, 0x02], UInt16, BigEndian())
-        @test_throws MethodError decode_next([0x01, 0x02], 1, UInt16, BigEndian())
+        @test try_decode([0x01, 0x02], UInt16, BigEndian()) === 0x0102
+        @test decode([0x01, 0x02], UInt16, BigEndian()) === 0x0102
+        @test decode_next([0x01, 0x02], 1, UInt16, BigEndian()) === (0x0102, 3)
         @test_throws MethodError decode_next(MemoryView([0x01, 0x02]), UInt16, BigEndian())
         v = zeros(UInt8, 2)
         @test encode!(MemoryView(v), 0x0102, BigEndian()) == 2
         @test v == [0x01, 0x02]
-        @test_throws MethodError encode!(v, 0x0102, BigEndian())
-        @test_throws MethodError encode!(ImmutableMemoryView(v), 0x0102, BigEndian())
-        @test_throws MethodError try_encode!(v, 0x0102, BigEndian())
+        @test encode!(v, 0x0304, BigEndian()) == 2
+        @test try_encode!(v, 0x0506, BigEndian()) == 2
+        @test v == [0x05, 0x06]
+        @test_throws TypeError encode!(ImmutableMemoryView(v), 0x0102, BigEndian())
         # Missing methods are MethodErrors, not stack overflows
         @test_throws MethodError try_decode(ImmutableMemoryView(v), String, BigEndian())
         @test_throws MethodError try_decode(MemoryView(v), String, BigEndian())
@@ -758,12 +832,12 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         @test decode_into!(MemoryView(dst), MemoryView([0x01, 0x00, 0x02, 0x01]), LittleEndian()) == (2, 2)
         @test dst[1:2] == [true, false]
 
-        # Only memory views are accepted
-        @test_throws MethodError decode_into!(zeros(UInt8, 2), MemoryView([0x01]), LittleEndian())
-        @test_throws MethodError decode_into!(MemoryView(zeros(UInt8, 2)), [0x01], LittleEndian())
-        @test_throws MethodError encode_into!(MemoryView(zeros(UInt8, 2)), [0x01], LittleEndian())
-        @test_throws MethodError load_into!(CursorReader([0x01]), zeros(UInt8, 1), LittleEndian())
-        @test_throws MethodError store_all(VecWriter(), [0x01], LittleEndian())
+        # Memory that `MemoryView` can view is accepted too, see "Memory-like arguments"
+        @test decode_into!(zeros(UInt8, 2), MemoryView([0x01]), LittleEndian()) == (1, 1)
+        @test decode_into!(MemoryView(zeros(UInt8, 2)), [0x01], LittleEndian()) == (1, 1)
+        @test encode_into!(MemoryView(zeros(UInt8, 2)), [0x01], LittleEndian()) == (1, 1)
+        @test load_into!(CursorReader([0x01]), zeros(UInt8, 1), LittleEndian()) == 1
+        @test store_all(VecWriter(), [0x01], LittleEndian()) == 1
 
         # Variable-length encodings
         s = "aé€😀\xe2\x82"
@@ -830,6 +904,56 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
 
         # Too-small capacity
         @test_throws IOError load_into!(BoundedReader(zeros(UInt8, 8), 2), MemoryView(zeros(UInt32, 2)), LittleEndian())
+    end
+
+    @testset "load!" begin
+        data = collect(UInt8, 1:40)
+        for max_fill in (1, 3, 8, 100), T in (UInt8, UInt16, UInt32, UInt64)
+            n = div(40, sizeof(T))
+            expected = [ltoh(x) for x in reinterpret(T, data)]
+            io = BoundedReader(data, 16; max_fill)
+            dst = MemoryView(Vector{T}(undef, n))
+            @test load!(io, dst, LittleEndian()) === dst
+            @test collect(dst) == expected
+            @test is_err(try_load(io, UInt8, LittleEndian()), EndOfInput)
+        end
+        # Variable-length elements straddling the buffer
+        s = "aé€😀\xe2\x82 x\xffyz€"
+        for max_fill in 1:5, cap in 4:6
+            io = BoundedReader(s, cap; max_fill)
+            dst = Vector{Char}(undef, length(s))
+            load!(io, MemoryView(dst), UTF8())
+            @test dst == collect(s)
+        end
+        # An empty `dst` loads nothing
+        io = CursorReader([0x01])
+        @test isempty(load!(io, MemoryView(UInt8[]), LittleEndian()))
+        @test length(get_buffer(io)) == 1
+
+        # No bytes at all
+        @test_throws DecodeError(EndOfInput) load!(CursorReader(UInt8[]), MemoryView(zeros(UInt16, 2)), LittleEndian())
+        # Ends between two elements, after some were loaded
+        io = CursorReader([0x01, 0x00])
+        dst = zeros(UInt16, 2)
+        @test_throws DecodeError(EndOfInput) load!(io, MemoryView(dst), LittleEndian())
+        @test dst[1] == 0x0001
+        @test isempty(get_buffer(io))
+        # Ends partway through an element, which is not consumed
+        io = CursorReader([0x01, 0x00, 0x02])
+        @test_throws DecodeError(Truncated) load!(io, MemoryView(zeros(UInt16, 2)), LittleEndian())
+        @test length(get_buffer(io)) == 1
+        # An invalid element, which is not consumed
+        io = CursorReader([0x01, 0x00, 0x05, 0x01])
+        dst = zeros(Bool, 4)
+        @test_throws DecodeError(InvalidData) load!(io, MemoryView(dst), BigEndian())
+        @test dst[1:2] == [true, false]
+        @test length(get_buffer(io)) == 2
+        # Too-small capacity
+        @test_throws IOError load!(BoundedReader(zeros(UInt8, 8), 2), MemoryView(zeros(UInt32, 2)), LittleEndian())
+        # The convenience modules
+        dst = zeros(UInt16, 2)
+        Big.load!(CursorReader([0x00, 0x01, 0x00, 0x02]), MemoryView(dst))
+        @test dst == [0x0001, 0x0002]
     end
 
     @testset "store_all" begin
@@ -953,6 +1077,24 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         @test occursin("collection[7]", error_message(() -> encode!(MemoryView(v), 7, 0x01, BigEndian())))
         @test occursin("collection[7]", error_message(() -> try_encode!(MemoryView(v), 7, 'a', UTF8())))
         @test v == zeros(UInt8, 5)
+        # Only the bytes of the encoding are written, and nothing when it doesn't fit
+        for (x, e) in (('a', UTF8()), ('é', UTF8()), ('€', UTF8()), ('😀', UTF8()),
+                (0x0102, BigEndian()), (true, CBool()), (Header(1, 2, 3, 4), LittleEndian()))
+            for len in 0:12, i in 1:(len + 1)
+                buf = fill(0xaa, len)
+                n = try_encode!(MemoryView(buf), i, x, e)
+                written = n === nothing ? 0 : n
+                @test all(==(0xaa), buf[1:(i - 1)])
+                @test all(==(0xaa), buf[(i + written):end])
+            end
+        end
+        for (src, e) in ((['a', '€', 'é', '😀'], UTF8()), ([true, false, true], CBool()))
+            for len in 0:12
+                buf = fill(0xaa, len)
+                (_, n_bytes) = encode_into!(MemoryView(buf), MemoryView(src), e)
+                @test all(==(0xaa), buf[(n_bytes + 1):end])
+            end
+        end
         # The same as `try_encode!` when the encoding fits
         for (x, e) in ((0x0102, BigEndian()), ('€', UTF8()), (true, CBool()), (Header(1, 2, 3, 4), LittleEndian()))
             a = zeros(UInt8, 9)
@@ -1035,7 +1177,10 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         @test encode!(MemoryView(UInt8[]), Empty(), BigEndian()) == 0
 
         # Structs that can't be bits types
-        for T in (Padded, LoadableWithBool, WithChar, WithPlain, WithPadded, (HAS_NARROW ? (WithNarrow,) : ())...)
+        for T in (
+                Padded, LoadableWithBool, WithChar, WithPlain, WithPadded, Misaligned,
+                TrailingPadding, MisalignedNested, WithU256, WithU24, (HAS_NARROW ? (WithNarrow,) : ())...,
+            )
             @test_throws ArgumentError max_encoded_size(T, LittleEndian())
             @test_throws ArgumentError try_decode(MemoryView(zeros(UInt8, 16)), T, BigEndian())
             @test_throws ArgumentError decode_into!(MemoryView(Vector{T}(undef, 1)), MemoryView(zeros(UInt8, 16)), BigEndian())
@@ -1047,12 +1192,29 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         catch e
             sprint(showerror, e)
         end
-        @test occursin("3 bytes of padding", message(Padded))
+        @test occursin("`Padded` has padding on some or all platforms, so it can't be `BitsLoadable`: its field `b` follows 1 bytes of other fields, which is not a multiple of 4, the size of its type `UInt32`", message(Padded))
         @test occursin("`LoadableWithBool` is `BitsLoadable`, but its field `a` has the type `Bool`, which is `BitsStorable`", message(LoadableWithBool))
         @test occursin("field `c` of `WithChar` has the type `Char`, whose `bits_kind` is `ManualCodec`", message(WithChar))
         @test occursin("field `p` of `WithPlain` has the type `Plain`", message(WithPlain))
-        @test occursin("`Padded` has 3 bytes of padding", message(WithPadded))
-        HAS_NARROW && @test occursin("whose bits don't fill its bytes", message(WithNarrow))
+        @test occursin("`Padded` has padding", message(WithPadded))
+        HAS_NARROW && @test occursin("whose bit width 30 is not a power of two of at least 8", message(WithNarrow))
+        @test occursin("field `b` follows 4 bytes of other fields, which is not a multiple of 8", message(Misaligned))
+        @test occursin("its fields have 12 bytes, which is not a multiple of 8, the size of its largest primitive field", message(TrailingPadding))
+        @test occursin("field `h` follows 2 bytes of other fields, which is not a multiple of 4, the size of the largest primitive field of its type `Header`", message(MisalignedNested))
+        @test occursin("field `b` follows 16 bytes of other fields, which is not a multiple of 32, the size of its type `U256`", message(WithU256))
+        @test occursin("whose bit width 24 is not a power of two of at least 8", message(WithU24))
+        # The stricter rule rejects `WithU256` although it has no padding on this platform
+        @test fieldoffset(WithU256, 2) == 16 && sizeof(WithU256) == 48 || Base.datatype_alignment(U256) == 32
+        # Accepted structs round-trip
+        for x in (
+                Ordered(0x0102030405060708, 0x090a0b0c, 0x0d0e, 0x0f, 0x10),
+                ExplicitPadding(0x01020304, 0x00000000, 0x05060708090a0b0c),
+                WithU256Aligned(reinterpret(U256, ntuple(UInt8, 32)), 0x01, 0x02),
+            ), e in (LittleEndian(), BigEndian())
+            buf = zeros(UInt8, sizeof(x))
+            @test encode!(buf, x, e) == sizeof(x)
+            @test decode(buf, typeof(x), e) === x
+        end
         # Not opted in: no codec
         @test_throws MethodError max_encoded_size(Plain, LittleEndian())
     end
@@ -1084,6 +1246,9 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         @test v == [0x07, 0x08, 0x01, 0x02, 0x03, 0x04]
 
         # The data is still validated
+        @test_throws DecodeError(InvalidData) decode_inbounds(MemoryView([0x02]), 1, Bool, LittleEndian())
+        @test_throws DecodeError(InvalidData) decode_inbounds(MemoryView([0x00, 0x00]), 1, Fruit, LittleEndian())
+        @test_throws DecodeError(InvalidData) decode_inbounds(MemoryView([0x00, 0x00, 0x02, 0x03]), 1, Flagged, BigEndian())
         @test try_decode_inbounds(MemoryView([0x02]), 1, Bool, LittleEndian()) === DecodeError(InvalidData)
         @test try_decode_inbounds(MemoryView([0x00, 0x00]), 1, Fruit, LittleEndian()) === DecodeError(InvalidData)
         @test try_decode_inbounds(MemoryView([0x00, 0x00, 0x02, 0x03]), 1, Flagged, BigEndian()) === DecodeError(InvalidData)
@@ -1100,22 +1265,142 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         @test io.vec == [0x01]
 
         if ELIDES_BOUNDSCHECKS
-            # The length checks are skipped. This breaks the contract of `@inbounds`, which
-            # is only memory-safe here because the views are within a larger memory.
+            # The length checks of the throwing functions are skipped. This breaks the
+            # contract of `@inbounds`, which is only memory-safe here because the views
+            # are within a larger memory.
             backing = MemoryView([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08])
             short = backing[3:4]
             @test try_decode(short, 2, UInt32, BigEndian()) === DecodeError(Truncated)
-            @test try_decode_inbounds(short, 2, UInt32, BigEndian()) === 0x04050607
-            @test next_inbounds(short, 2, UInt32, BigEndian()) === (0x04050607, 6)
+            # The `try_` functions ignore `@inbounds`
+            @test try_decode_inbounds(short, 2, UInt32, BigEndian()) === DecodeError(Truncated)
+            @test next_inbounds(short, 2, UInt32, BigEndian()) === DecodeError(Truncated)
+            @test try_decode_inbounds(short, 3, UInt32, BigEndian()) === DecodeError(EndOfInput)
+            @test_throws LightBoundsError try_decode_inbounds(short, 0, UInt32, BigEndian())
+            @test try_encode_inbounds!(backing[1:2], 2, 0xaabbccdd, BigEndian()) === nothing
+            @test_throws LightBoundsError try_encode_inbounds!(backing[1:2], 4, 0xaabbccdd, BigEndian())
             @test decode_inbounds(short, 3, UInt16, BigEndian()) === 0x0506
             @test start_inbounds(short, UInt32, LittleEndian()) === 0x06050403
             @test little_inbounds(short, 2) === (0x0504, 4)
             @test try_encode!(backing[1:2], 2, 0xaabbccdd, BigEndian()) === nothing
             @test_throws LightBoundsError encode!(backing[1:2], 2, 0xaabbccdd, BigEndian())
-            @test try_encode_inbounds!(backing[1:2], 2, 0xaabbccdd, BigEndian()) === 4
             @test encode_inbounds!(backing[1:2], 2, 0xa1b1c1d1, BigEndian()) === 4
             @test collect(backing) == [0x01, 0xa1, 0xb1, 0xc1, 0xd1, 0x06, 0x07, 0x08]
         end
+    end
+
+    @testset "Codec contract checks" begin
+        decode_inbounds(mem, ::Type{T}, e) where {T} = @inbounds decode(mem, T, e)
+        encode_inbounds!(mem, x, e) = @inbounds encode!(mem, x, e)
+        mem = MemoryView(zeros(UInt8, 10))
+        for T in (Int8, Int16)
+            @test_throws ErrorException try_decode(mem, T, Liar())
+            @test_throws ErrorException try_decode_next(mem, 1, T, Liar())
+            @test_throws ErrorException decode_inbounds(mem, T, Liar())
+            @test_throws ErrorException decode_into!(MemoryView(zeros(T, 3)), mem, Liar())
+            @test_throws ErrorException try_encode!(mem, zero(T), Liar())
+            @test_throws ErrorException encode_inbounds!(mem, zero(T), Liar())
+            @test_throws ErrorException encode_into!(mem, MemoryView(zeros(T, 3)), Liar())
+            # Nothing is consumed from the reader or writer
+            io = CursorReader(zeros(UInt8, 10))
+            @test_throws ErrorException try_load(io, T, Liar())
+            @test_throws ErrorException load_into!(io, MemoryView(zeros(T, 3)), Liar())
+            @test load_all!(io, MemoryView(zeros(UInt8, 20)), LittleEndian()) == 10
+            io = VecWriter()
+            @test_throws ErrorException store(io, zero(T), Liar())
+            @test_throws ErrorException store_all(io, MemoryView(zeros(T, 3)), Liar())
+            @test isempty(io.vec)
+        end
+        # Only counts outside `mem` are caught
+        @test try_decode_next(mem, 1, UInt8, Liar()) === (0x00, 4)
+        @test try_encode!(mem, 0x00, Liar()) === 3
+        @test_throws ErrorException try_decode(MemoryView(zeros(UInt8, 2)), UInt8, Liar())
+        msg = try
+            try_decode(mem, Int16, Liar())
+        catch e
+            sprint(showerror, e)
+        end
+        @test occursin("`codec_try_decode` for `Int16` with `Liar()` broke its contract", msg)
+        @test occursin("byte count of -1", msg)
+    end
+
+    @testset "Memory-like arguments" begin
+        bytes = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06]
+        mem = MemoryView(bytes)
+        # The same results as with a `MemoryView`
+        for b in (bytes, Memory{UInt8}(bytes), view(bytes, 1:6))
+            @test try_decode(b, UInt32, BigEndian()) === try_decode(mem, UInt32, BigEndian())
+            @test try_decode(b, 3, UInt32, BigEndian()) === try_decode(mem, 3, UInt32, BigEndian())
+            @test try_decode(b, 4, UInt32, BigEndian()) === DecodeError(Truncated)
+            @test decode(b, UInt16, LittleEndian()) === 0x0201
+            @test decode(b, 5, UInt16, LittleEndian()) === 0x0605
+            @test try_decode_next(b, 2, UInt16, BigEndian()) === (0x0203, 4)
+            @test decode_next(b, 5, UInt16, BigEndian()) === (0x0506, 7)
+        end
+        @test decode(view(bytes, 3:6), UInt16, BigEndian()) === 0x0304
+        v = zeros(UInt8, 5)
+        @test try_encode!(v, 0x0102, BigEndian()) === 2
+        @test try_encode!(v, 4, 0x0304, BigEndian()) === 2
+        @test try_encode!(v, 5, 0x0304, BigEndian()) === nothing
+        @test v == [0x01, 0x02, 0x00, 0x03, 0x04]
+        @test encode!(view(v, 2:5), 'é', UTF8()) === 2
+        @test encode!(v, 5, 0x09, BigEndian()) === 1
+        @test v == [0x01, 0xc3, 0xa9, 0x03, 0x09]
+
+        # Bulk functions
+        dst = zeros(UInt16, 3)
+        @test decode_into!(dst, bytes, LittleEndian()) == (3, 6)
+        @test dst == [0x0201, 0x0403, 0x0605]
+        out = zeros(UInt8, 6)
+        @test encode_into!(out, dst, BigEndian()) == (3, 6)
+        @test out == [0x02, 0x01, 0x04, 0x03, 0x06, 0x05]
+        dst = zeros(UInt16, 2)
+        @test load_into!(CursorReader(bytes), dst, LittleEndian()) == 2
+        @test dst == [0x0201, 0x0403]
+        dst = zeros(UInt16, 4)
+        @test load_all!(CursorReader(bytes), dst, BigEndian()) == 3
+        @test dst[1:3] == [0x0102, 0x0304, 0x0506]
+        # `load!` returns its argument itself
+        dst = zeros(UInt16, 3)
+        @test load!(CursorReader(bytes), dst, BigEndian()) === dst
+        @test dst == [0x0102, 0x0304, 0x0506]
+        io = VecWriter()
+        @test store_all(io, ['a', 'é'], UTF8()) == 3
+        @test io.vec == [0x61, 0xc3, 0xa9]
+        # The convenience modules
+        @test Little.decode(bytes, 2, UInt16) === 0x0302
+        @test Big.load!(CursorReader(bytes), zeros(UInt16, 3)) == [0x0102, 0x0304, 0x0506]
+
+        # Strings are not converted implicitly, since that allocates
+        s = "abcdef"
+        for x in (s, SubString(s, 2), codeunits(s))
+            @test_throws ArgumentError try_decode(x, UInt8, LittleEndian())
+            @test_throws ArgumentError decode(x, 2, UInt8, LittleEndian())
+            @test_throws ArgumentError try_decode_next(x, 1, Char, UTF8())
+            @test_throws ArgumentError decode_into!(zeros(UInt8, 2), x, LittleEndian())
+            @test_throws ArgumentError store_all(VecWriter(), x, LittleEndian())
+        end
+        @test_throws ArgumentError encode_into!(zeros(UInt8, 4), "ab", UTF8())
+        # Memory of the wrong element type or mutability is an error, not an infinite
+        # recursion
+        @test_throws TypeError try_decode(Int8[1, 2], UInt8, LittleEndian())
+        @test_throws TypeError try_decode(MemoryView(Int8[1, 2]), UInt8, LittleEndian())
+        @test_throws TypeError encode!(ImmutableMemoryView(zeros(UInt8, 2)), 0x01, LittleEndian())
+        @test_throws TypeError decode_into!(ImmutableMemoryView(zeros(UInt8, 2)), bytes, LittleEndian())
+        @test_throws TypeError load!(CursorReader(bytes), ImmutableMemoryView(zeros(UInt16, 2)), LittleEndian())
+        # Not memory at all
+        @test_throws MethodError try_decode(0x01:0x05, UInt8, LittleEndian())
+
+        # Converting a `Vector` doesn't allocate
+        decode_vector(v, i) = decode(v, i, UInt32, LittleEndian())
+        encode_vector!(v, x) = encode!(v, 2, x, BigEndian())
+        decode_vector(bytes, 2)
+        encode_vector!(v, 0x0102)
+        @test (@allocated decode_vector(bytes, 2)) == 0
+        @test (@allocated encode_vector!(v, 0x0102)) == 0
+    end
+
+    @testset "No method ambiguities" begin
+        @test isempty(Test.detect_ambiguities(BitScribbling; recursive = true))
     end
 
     @testset "Little and Big" begin
@@ -1221,10 +1506,10 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
     @testset "Doctests" begin
         using Documenter: DocMeta, doctest
         DocMeta.setdocmeta!(
-            BufferSerde, :DocTestSetup, :(using BufferSerde, BufferIO; using MemoryViews: MemoryView);
+            BitScribbling, :DocTestSetup, :(using BitScribbling, BufferIO; using MemoryViews: MemoryView);
             recursive = true,
         )
-        doctest(BufferSerde; manual = false)
+        doctest(BitScribbling; manual = false)
     end
 
-end # testset BufferSerde
+end # testset BitScribbling

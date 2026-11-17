@@ -1,7 +1,10 @@
-name = "BufferSerde"
-uuid = "cc8e1029-eeea-4c7e-b46e-73be336b6cfa"
+name = "BitScribbling"
+uuid = "bbfcd723-da14-4e8b-b7cd-e1801694cbd7"
 version = "0.1.0"
 authors = ["Jakob Nybo Andersen <jakobnybonissen@gmail.com>"]
+
+[workspace]
+projects = ["test", "docs"]
 
 [deps]
 BufferIO = "ff366017-094f-4144-bd70-a828a0d67152"

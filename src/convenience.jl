@@ -2,24 +2,25 @@
 # encoding argument.
 const convenience_functions = (
     (:max_encoded_size, (:(T::Type),)),
-    (:try_decode, (:(mem::MemoryView{UInt8}), :(T::Type))),
-    (:try_decode, (:(mem::MemoryView{UInt8}), :(i::Integer), :(T::Type))),
-    (:decode, (:(mem::MemoryView{UInt8}), :(T::Type))),
-    (:decode, (:(mem::MemoryView{UInt8}), :(i::Integer), :(T::Type))),
-    (:try_decode_next, (:(mem::MemoryView{UInt8}), :(i::Integer), :(T::Type))),
-    (:decode_next, (:(mem::MemoryView{UInt8}), :(i::Integer), :(T::Type))),
-    (:try_encode!, (:(mem::MutableMemoryView{UInt8}), :x)),
-    (:try_encode!, (:(mem::MutableMemoryView{UInt8}), :(i::Integer), :x)),
-    (:encode!, (:(mem::MutableMemoryView{UInt8}), :x)),
-    (:encode!, (:(mem::MutableMemoryView{UInt8}), :(i::Integer), :x)),
+    (:try_decode, (:mem, :(T::Type))),
+    (:try_decode, (:mem, :(i::Integer), :(T::Type))),
+    (:decode, (:mem, :(T::Type))),
+    (:decode, (:mem, :(i::Integer), :(T::Type))),
+    (:try_decode_next, (:mem, :(i::Integer), :(T::Type))),
+    (:decode_next, (:mem, :(i::Integer), :(T::Type))),
+    (:try_encode!, (:mem, :x)),
+    (:try_encode!, (:mem, :(i::Integer), :x)),
+    (:encode!, (:mem, :x)),
+    (:encode!, (:mem, :(i::Integer), :x)),
     (:try_load, (:(io::AbstractBufReader), :(T::Type))),
     (:load, (:(io::AbstractBufReader), :(T::Type))),
     (:store, (:(io::AbstractBufWriter), :x)),
-    (:decode_into!, (:(dst::MutableMemoryView), :(src::MemoryView{UInt8}))),
-    (:encode_into!, (:(dst::MutableMemoryView{UInt8}), :(src::MemoryView))),
-    (:load_into!, (:(io::AbstractBufReader), :(dst::MutableMemoryView))),
-    (:load_all!, (:(io::AbstractBufReader), :(dst::MutableMemoryView))),
-    (:store_all, (:(io::AbstractBufWriter), :(src::MemoryView))),
+    (:decode_into!, (:dst, :src)),
+    (:encode_into!, (:dst, :src)),
+    (:load_into!, (:(io::AbstractBufReader), :dst)),
+    (:load_all!, (:(io::AbstractBufReader), :dst)),
+    (:load!, (:(io::AbstractBufReader), :dst)),
+    (:store_all, (:(io::AbstractBufWriter), :src)),
 )
 
 for (mod, E, desc) in (
@@ -30,23 +31,23 @@ for (mod, E, desc) in (
     doc = """
         module $mod
 
-    The functions of BufferSerde, with the encoding fixed to `$E()`.
-    Every function forwards to the function of the same name in BufferSerde,
+    The functions of BitScribbling, with the encoding fixed to `$E()`.
+    Every function forwards to the function of the same name in BitScribbling,
     with `$E()` as the last argument. The forwarding propagates `@inbounds`.
 
-    The module also exports various other names, so that `using BufferSerde.$mod`
+    The module also exports various other names, so that `using BitScribbling.$mod`
     is all that is needed to use it.
 
     # Examples
     ```julia
-    using BufferSerde.$mod: load, store
+    using BitScribbling.$mod: load, store
 
     load(io, UInt32) # loads a $desc UInt32
     ```
     """
     m = @eval begin
         @doc $doc module $mod
-        using ..BufferSerde: BufferSerde, $E, MemoryView, MutableMemoryView,
+        using ..BitScribbling: BitScribbling, $E, MemoryView, MutableMemoryView,
             AbstractBufReader, AbstractBufWriter,
             DecodeError, DecodeErrorKinds, @try_return
 
@@ -59,8 +60,8 @@ for (mod, E, desc) in (
         fdoc = """
             $mod.$f($signature)
 
-        Forward to [`BufferSerde.$f`](@ref) with `$E()` as the encoding.
+        Forward to [`BitScribbling.$f`](@ref) with `$E()` as the encoding.
         """
-        Core.eval(m, :(@doc $fdoc Base.@propagate_inbounds $f($(args...)) = BufferSerde.$f($(arg_names...), $E())))
+        Core.eval(m, :(@doc $fdoc Base.@propagate_inbounds $f($(args...)) = BitScribbling.$f($(arg_names...), $E())))
     end
 end

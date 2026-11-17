@@ -34,13 +34,32 @@ exactly its representation in memory.
 
 Such a struct must satisfy these requirements, which are checked when it is first
 encoded or decoded. If they don't hold, an `ArgumentError` is thrown:
-* It has no padding: the sizes of its fields add up to `sizeof(T)`. Note that the
-  padding of a struct depends on the platform and the Julia version.
-* The bits of each primitive field fill its bytes, so a field can't be e.g. a
-  `primitive type Foo 60 end`.
 * The [`bits_kind`](@ref) of each field is not `ManualCodec`, and the fields that are
   structs satisfy these requirements themselves.
 * If `T` is `BitsLoadable`, all its fields are `BitsLoadable`.
+* The bit width of each primitive field is a power of two, and at least 8, as for
+  `UInt8`, `Float32` or `Int128`. So a field can't be e.g. a `primitive type Foo 24 end`.
+* `T` has no padding on any platform.
+
+Whether a struct has padding depends on the alignment of its fields, which depends on
+the platform and the Julia version. For example, `UInt64` is aligned to 8 bytes on
+x86-64, but may be aligned to 4 bytes on 32-bit platforms. Therefore, the last
+requirement is checked against the strictest layout that any platform could give `T`:
+the one in which every primitive type is aligned to its size. In this layout, the fields
+follow each other without gaps, and
+* each primitive field must start at a multiple of its size;
+* each field that is a struct must start at a multiple of the size of its largest
+  primitive field;
+* the size of `T` must be a multiple of the size of its largest primitive field.
+
+This makes the check, and so the encoding, the same on every platform and Julia version.
+For example, a struct with the fields `a::UInt32` and `b::UInt64` is rejected also on
+platforms where it has no padding. To satisfy the requirement, order the fields from
+largest to smallest, or add fields for the padding, e.g. `pad::UInt32`.
+
+Declare fields with explicit widths, such as `Int64`, never `Int` or `UInt`, whose
+widths depend on the platform. This can't be checked, since `Int` is the same type as
+`Int64` or `Int32`.
 """
 abstract type BitsKind end
 
@@ -83,7 +102,8 @@ The default value of `bits_kind(T)` is `ManualCodec()`. It signals that the enco
 hand-written codec. This is the case for many bits types, e.g. `Char`, as well as for
 types that are not bits types.
 
-For such a type `T`, implement per supported `E::Encoding`:
+For such a type `T`, implement for each supported concrete encoding type `E`, see
+[`Encoding`](@ref):
 * [`codec_max_encoded_size(::Type{T}, ::E)`](@ref codec_max_encoded_size)
 * [`codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{T}, ::E)`](@ref codec_try_decode)
 * [`codec_encode!(mem::MutableMemoryView{UInt8}, x::T, ::E)`](@ref codec_encode!)
@@ -132,8 +152,8 @@ encoding has already been undone. So, if `bytes` are valid, they are those of
 # Examples
 ```julia
 primitive type Digit 8 end # 0 to 9
-BufferSerde.bits_kind(::Type{Digit}) = BufferSerde.BitsStorable()
-BufferSerde.is_valid_bits(::Type{Digit}, bytes::NTuple{1, UInt8}) = bytes[1] ≤ 0x09
+BitScribbling.bits_kind(::Type{Digit}) = BitScribbling.BitsStorable()
+BitScribbling.is_valid_bits(::Type{Digit}, bytes::NTuple{1, UInt8}) = bytes[1] ≤ 0x09
 ```
 """
 function is_valid_bits end
@@ -188,7 +208,7 @@ julia> x = 0x00ab_cdef;
 
 julia> bytes = NATIVE_ENDIAN === LittleEndian() ? (0xef, 0xcd, 0xab) : (0xab, 0xcd, 0xef);
 
-julia> BufferSerde.as_unsigned(bytes) === x
+julia> BitScribbling.as_unsigned(bytes) === x
 true
 ```
 """
@@ -244,7 +264,8 @@ Base.@assume_effects :foldable function bits_type_error(
     if !(isstructtype(T) && isbitstype(T))
         return "`bits_kind($T)` is `$(kind_name(kind))`, but `$T` is neither a primitive type nor an isbits struct"
     end
-    total_size = 0
+    # The offset of the next field in the strictest layout, see the docstring of `BitsKind`
+    offset = 0
     for i in 1:fieldcount(T)
         F = fieldtype(T, i)
         name = fieldname(T, i)
@@ -255,19 +276,49 @@ Base.@assume_effects :foldable function bits_type_error(
             return "`$T` is `BitsLoadable`, but its field `$name` has the type `$F`, which is `$(kind_name(field_kind))`"
         end
         if isprimitivetype(F)
-            if !fills_bytes(F)
-                return "The field `$name` of `$T` has the type `$F`, whose bits don't fill its bytes"
+            n_bits = bit_size(F)
+            if !(n_bits ≥ 8 && ispow2(n_bits))
+                return "The field `$name` of `$T` has the type `$F`, whose bit width $n_bits is not a power of two of at least 8"
             end
         else
             message = bits_type_error(F, field_kind)
             message === nothing || return message
         end
-        total_size += sizeof(F)
+        alignment = strictest_alignment(F)
+        if offset % alignment != 0
+            of_what = isprimitivetype(F) ? "its type `$F`" : "the largest primitive field of its type `$F`"
+            return "`$T` has padding on some or all platforms, so it can't be `$(kind_name(kind))`: " *
+                "its field `$name` follows $offset bytes of other fields, which is not a multiple of " *
+                "$alignment, the size of $of_what"
+        end
+        # This holds if every primitive type is aligned to at most its size
+        if offset != fieldoffset(T, i)
+            return "`$T` has padding before its field `$name`, so it can't be `$(kind_name(kind))`"
+        end
+        offset += sizeof(F)
     end
-    if total_size != sizeof(T)
-        return "`$T` has $(sizeof(T) - total_size) bytes of padding, so it can't be `$(kind_name(kind))`"
+    alignment = strictest_alignment(T)
+    if offset % alignment != 0
+        return "`$T` has padding on some or all platforms, so it can't be `$(kind_name(kind))`: " *
+            "its fields have $offset bytes, which is not a multiple of $alignment, the size of its " *
+            "largest primitive field"
+    end
+    if offset != sizeof(T)
+        return "`$T` has padding at its end, so it can't be `$(kind_name(kind))`"
     end
     return nothing
+end
+
+# The alignment of the bits type T in the strictest layout that any platform could give
+# it, in which every primitive type is aligned to its size. The primitive fields of a
+# struct must have been checked to have bit widths that are powers of two.
+function strictest_alignment(T::Type)::Int
+    isprimitivetype(T) && return sizeof(T)
+    alignment = 1
+    for i in 1:fieldcount(T)
+        alignment = max(alignment, strictest_alignment(fieldtype(T, i)))
+    end
+    return alignment
 end
 
 # The number of bits of the primitive type T that hold its value. Before Julia 1.14, the
