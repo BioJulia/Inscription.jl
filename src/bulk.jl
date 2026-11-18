@@ -40,7 +40,7 @@ function decode_into!(
 end
 
 # Decode elements of src into dst. If `complete` is false, src is not the complete input,
-# so only decode elements while at least `max_encoded_size(T, enc)` bytes remain.
+# so only decode elements that the bytes in src decide, see `codec_bytes_needed`.
 @inline function decode_elements!(
         dst::MutableMemoryView{T},
         src::ImmutableMemoryView{UInt8},
@@ -63,12 +63,15 @@ end
         end
         return (n_max, n_max * element_size)
     end
-    min_remaining = complete ? 0 : codec_max_encoded_size(T, enc)
+    max_size = codec_max_encoded_size(T, enc)
     n_elements = 0
     n_bytes = 0
     while n_elements < length(dst)
         rest = @inbounds src[(n_bytes + 1):end]
-        length(rest) < min_remaining && break
+        # By rule 4 of `codec_try_decode`, `max_size` bytes decide the element
+        if !complete && length(rest) < max_size && codec_bytes_needed(rest, T, enc) > length(rest)
+            break
+        end
         result = call_codec_try_decode(rest, T, enc)
         result isa DecodeError && break
         (x, n) = result
@@ -189,8 +192,10 @@ Load at least one element, unless `dst` is empty, `io` is EOF, or the next eleme
 loading stops at the first element that fails, and nothing of that element is consumed.
 So a following `try_load(io, T, enc)` reports why.
 
-Like `try_load`, throw an `IOError` of kind `BufferTooShort` if the buffer capacity of
-`io` is smaller than [`max_encoded_size(T, enc)`](@ref max_encoded_size).
+Like `try_load`, wait only until the bytes buffered in `io` decide the next element, and
+throw an `IOError` of kind `BufferTooShort` if `io` must buffer more bytes than its
+capacity. This can only happen if the capacity is smaller than
+[`max_encoded_size(T, enc)`](@ref max_encoded_size).
 
 See also: [`load_all!`](@ref), [`load!`](@ref), [`decode_into!`](@ref)
 
@@ -213,11 +218,10 @@ DecodeError(BitScribbling.DecodeErrorKinds.Truncated)
 function load_into!(io::AbstractBufReader, dst::MutableMemoryView{T}, enc::Encoding)::Int where {T}
     isempty(dst) && return 0
     buffer = get_buffer(io)::ImmutableMemoryView{UInt8}
+    complete = false
     if length(buffer) < max_encoded_size(T, enc)
-        buffer = @noinline buffer_value(io, max_encoded_size(T, enc))
+        (buffer, complete) = @noinline buffer_decided(io, T, enc)
     end
-    # buffer_value only returns fewer bytes than that at EOF.
-    complete = length(buffer) < max_encoded_size(T, enc)
     (n_elements, n_bytes) = decode_elements!(dst, buffer, enc, complete)
     @inbounds consume(io, n_bytes)
     return n_elements
@@ -269,8 +273,9 @@ ends between two elements, the error is `EndOfInput`, also when some elements we
 loaded, and `Truncated` means that `io` ended partway through an element. This is like
 `read!` from Base, which throws an `EOFError` in both cases.
 
-Like `try_load`, throw an `IOError` of kind `BufferTooShort` if the buffer capacity of
-`io` is smaller than [`max_encoded_size(T, enc)`](@ref max_encoded_size).
+Like `try_load`, throw an `IOError` of kind `BufferTooShort` if `io` must buffer more
+bytes than its capacity, which can only happen if the capacity is smaller than
+[`max_encoded_size(T, enc)`](@ref max_encoded_size).
 
 See also: [`load_all!`](@ref), [`load`](@ref)
 

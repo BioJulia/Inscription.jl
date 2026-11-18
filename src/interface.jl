@@ -522,8 +522,10 @@ Extension point of a hand-written codec for the value type `T` and the concrete 
 type `E`, see [`Encoding`](@ref). Never call it directly; call [`max_encoded_size`](@ref).
 
 Return an upper bound on the number of bytes of any encoding of a `T`. The result must
-be constant-foldable. Loading and storing buffer this many bytes, if available, before
-calling [`codec_try_decode`](@ref) or [`codec_encode!`](@ref).
+be constant-foldable. Storing reserves this many bytes before calling
+[`codec_encode!`](@ref). Loading buffers this many bytes, if available, before calling
+[`codec_try_decode`](@ref), unless the codec implements
+[`codec_bytes_needed`](@ref) to say that fewer bytes decide the result.
 """
 function codec_max_encoded_size end
 
@@ -568,6 +570,8 @@ An implementation must follow this contract:
    that starts with those bytes.
 
 Rule 4 is what allows loading from a reader's buffer, which is not the complete input.
+To let loads decide with fewer bytes, a codec can also implement
+[`codec_bytes_needed`](@ref).
 
 The rules are not checked, with one exception: an `ErrorException` is thrown if the
 returned byte count is not in `0:length(mem)`, also in an `@inbounds` context. This is
@@ -575,6 +579,53 @@ because the byte count is used to consume bytes from readers, so a codec that br
 contract in this way would otherwise corrupt memory.
 """
 function codec_try_decode end
+
+"""
+    codec_bytes_needed(mem::ImmutableMemoryView{UInt8}, ::Type{T}, ::E)::Int
+
+Optional extension point of a hand-written codec for the value type `T` and the concrete
+encoding type `E`, see [`Encoding`](@ref). Never call it directly.
+
+`mem` holds the bytes that are available so far: the start of the input, but not
+necessarily all of it. Return the number of bytes `k` from the start of the input that
+decide the result of [`codec_try_decode`](@ref):
+* If `k ≤ length(mem)`, the result is decided: `codec_try_decode` returns the same for
+  every memory that starts with the first `k` bytes of `mem`, whether more bytes follow
+  or not.
+* Otherwise, it is not decided yet, and at least `k` bytes are needed in total, unless
+  the input ends before that.
+
+Since `k` is the number of bytes that decide the result, it may be larger than the
+encoding: for example, the decimal encoding of an integer is only decided by the byte
+after its last digit. By rule 4 of `codec_try_decode`, the first
+`max_encoded_size(T, enc)` bytes always decide the result, so `k` must be at most that.
+Like `codec_try_decode`, the result must depend only on the contents of `mem`, and no
+reference to `mem` may be kept.
+
+When fewer than `max_encoded_size(T, enc)` bytes are buffered, [`try_load`](@ref) and
+[`load_into!`](@ref) use this to wait only for the bytes that decide the next value.
+Otherwise, they wait until `max_encoded_size(T, enc)` bytes are buffered, or the input
+ends. This matters when more input may not arrive until the value has been used, e.g.
+for the last value of a request on a socket, or a key press on a terminal.
+
+The default method returns `max_encoded_size(T, enc)`, which is always correct.
+
+The contract is not checked. Breaking it can't make loading memory-unsafe, but loads may
+then return wrong results, or wait for more bytes than needed.
+"""
+function codec_bytes_needed(mem, ::Type{T}, enc::Encoding) where {T}
+    return codec_max_encoded_size(T, enc)
+end
+
+# The number of bytes that decide the result of decoding a T from the start of `mem`,
+# see `codec_bytes_needed`.
+@inline function bytes_needed(mem::ImmutableMemoryView{UInt8}, ::Type{T}, enc::Encoding)::Int where {T}
+    return if codec_kind(T, enc) isa ManualCodec
+        codec_bytes_needed(mem, T, enc)
+    else
+        bits_encoded_size(T)
+    end
+end
 
 """
     codec_encode!(mem::MutableMemoryView{UInt8}, x::T, ::E)::Union{Int, EncodeError}

@@ -234,8 +234,14 @@ struct Outer
 end
 BitScribbling.bits_kind(::Type{Outer}) = BitsStorable()
 BitScribbling.is_valid_bits(::Type{Outer}, ::NTuple{8, UInt8}) = true
+# Types of size zero are rejected, also as fields
 struct Empty end
 BitScribbling.bits_kind(::Type{Empty}) = BitsLoadable()
+struct WithEmpty
+    a::UInt32
+    e::Empty
+end
+BitScribbling.bits_kind(::Type{WithEmpty}) = BitsLoadable()
 
 # Structs that can't be bits types
 struct Padded
@@ -326,9 +332,30 @@ if HAS_NARROW
     end
 end
 
+# A reader of chunks that throws when it runs out, instead of returning EOF. It stands in
+# for a socket whose peer waits for a reply: filling more would block forever.
+mutable struct StallingReader <: AbstractBufReader
+    chunks::Vector{Vector{UInt8}}
+    buffer::Vector{UInt8}
+end
+StallingReader(chunks) = StallingReader(collect(Vector{UInt8}, chunks), UInt8[])
+BufferIO.get_buffer(x::StallingReader) = ImmutableMemoryView(x.buffer)
+function BufferIO.fill_buffer(x::StallingReader)
+    isempty(x.chunks) && error("would block")
+    chunk = popfirst!(x.chunks)
+    append!(x.buffer, chunk)
+    return length(chunk)
+end
+function BufferIO.consume(x::StallingReader, n::Int)
+    in(n, 0:length(x.buffer)) || throw(IOError(IOErrorKinds.ConsumeBufferError))
+    deleteat!(x.buffer, 1:n)
+    return nothing
+end
+Base.close(::StallingReader) = nothing
+
 # Pairs of a type and an encoding, covering every kind of codec
 const CODEC_CASES = let
-    types = (BITS_TYPES..., Bool, Fruit, Small, Signs, U24, S24, U144, S144, Header, Nested, Flagged, Outer, Empty)
+    types = (BITS_TYPES..., Bool, Fruit, Small, Signs, U24, S24, U144, S144, Header, Nested, Flagged, Outer)
     cases = Any[(T, e) for T in types for e in (LittleEndian(), BigEndian())]
     push!(cases, (Char, UTF8()), (Bool, CBool()), (Char, Latin1()), (Tuple{Char, Char}, Latin1()))
     if HAS_NARROW
@@ -720,16 +747,88 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
             @test chars == collect(s)
         end
 
-        # Capacity too small
-        @test_throws IOError load(BoundedReader("€", 3), Char, UTF8())
-        # ... but this is data-dependent
+        # A capacity smaller than `max_encoded_size` is only too small for the characters
+        # that need more bytes
         @test load(BoundedReader("é", 3), Char, UTF8()) === 'é'
+        @test load(BoundedReader("€", 3), Char, UTF8()) === '€'
+        @test_throws IOError load(BoundedReader("😀", 3), Char, UTF8())
+        for max_fill in 1:3
+            io = BoundedReader("aé€\xe2\x82!", 3; max_fill)
+            dst = Vector{Char}(undef, 10)
+            @test load_all!(io, MemoryView(dst), UTF8()) == 5
+            @test dst[1:5] == collect("aé€\xe2\x82!")
+        end
 
         io = VecWriter()
         for c in "aé€😀"
             store(io, c, UTF8())
         end
         @test String(io.vec) == "aé€😀"
+    end
+
+    @testset "Loading waits only for the bytes needed" begin
+        # A character is loaded as soon as its bytes are buffered
+        io = StallingReader([[0x61], [0xc3], [0xa9, 0xe2], [0x82, 0xac, 0x62]])
+        @test load(io, Char, UTF8()) === 'a'
+        @test load(io, Char, UTF8()) === 'é'
+        @test load(io, Char, UTF8()) === '€'
+        @test load(io, Char, UTF8()) === 'b'
+        # Nothing is buffered, so the next load must fill
+        @test_throws ErrorException load(io, Char, UTF8())
+        # A malformed character is decided by the byte after it
+        io = StallingReader([[0xe2], [0x41]])
+        @test load(io, Char, UTF8()) === '\xe2'
+        @test load(io, Char, UTF8()) === 'A'
+
+        # The same for loading into memory
+        io = StallingReader([[0x61, 0xc3], [0xa9]])
+        dst = Vector{Char}(undef, 5)
+        @test load_into!(io, MemoryView(dst), UTF8()) == 1 # 'é' isn't decided yet
+        @test dst[1] == 'a'
+        @test load_into!(io, MemoryView(dst), UTF8()) == 1
+        @test dst[1] == 'é'
+        io = StallingReader([[0x61, 0x62, 0xe2], [0x82, 0xac]])
+        @test load!(io, MemoryView(dst)[1:3], UTF8()) == ['a', 'b', '€']
+
+        # Fixed-size values, and codecs without `codec_bytes_needed`, wait for
+        # `max_encoded_size` bytes
+        io = StallingReader([[0x00], [0x01]])
+        @test load(io, UInt16, BigEndian()) === 0x0001
+        io = StallingReader([[0x61]])
+        @test_throws ErrorException load(io, Tuple{Char, Char}, Latin1())
+        @test BitScribbling.codec_bytes_needed(ImmutableMemoryView(UInt8[]), Tuple{Char, Char}, Latin1()) == 2
+
+        # The contract of `codec_bytes_needed`: if the bytes it asks for are there, they
+        # decide the result, whatever follows them.
+        bytes_needed = BitScribbling.bytes_needed
+        for (T, e) in CODEC_CASES
+            m = max_encoded_size(T, e)
+            for len in 0:(m + 1), _ in 1:20
+                bytes = rand(UInt8, len)
+                if T === Char && e === UTF8()
+                    # Mostly bytes that can continue an encoding, so that the codec
+                    # needs to see several bytes
+                    bytes = [rand() < 0.7 ? rand(0x80:0xbf) : b for b in bytes]
+                    len > 0 && (bytes[1] = rand((0x41, 0xc3, 0xe2, 0xf0, 0x80, 0xff)))
+                end
+                expected = try_decode_n(MemoryView(bytes), T, e)
+                for l in 0:len
+                    k = bytes_needed(ImmutableMemoryView(bytes[1:l]), T, e)
+                    @test 0 ≤ k ≤ m
+                    k ≤ l || continue
+                    @test isequal(try_decode_n(MemoryView(bytes[1:k]), T, e), expected)
+                    @test isequal(try_decode_n(MemoryView(vcat(bytes[1:k], 0x80, 0x41)), T, e), expected)
+                end
+            end
+        end
+        # For UTF-8, exactly the bytes of the character, and the byte that ends it early
+        @test bytes_needed(ImmutableMemoryView(UInt8[]), Char, UTF8()) == 1
+        @test bytes_needed(ImmutableMemoryView([0x61, 0x80]), Char, UTF8()) == 1
+        @test bytes_needed(ImmutableMemoryView([0xe2]), Char, UTF8()) == 2
+        @test bytes_needed(ImmutableMemoryView([0xe2, 0x82]), Char, UTF8()) == 3
+        @test bytes_needed(ImmutableMemoryView([0xe2, 0x82, 0xac]), Char, UTF8()) == 3
+        @test bytes_needed(ImmutableMemoryView([0xe2, 0x41]), Char, UTF8()) == 2
+        @test bytes_needed(ImmutableMemoryView([0xf0, 0x9f, 0x98, 0x80]), Char, UTF8()) == 4
     end
 
     @testset "try_load / load" begin
@@ -1200,9 +1299,6 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         @test try_decode_exact(MemoryView("€a"), Char, UTF8()) === DecodeError(TrailingData)
         @test try_decode_exact(MemoryView("a€"), 2, Char, UTF8()) === '€'
         @test decode_exact(MemoryView("\xe2\x82"), Char, UTF8()) === '\xe2\x82'
-        # Encodings of zero bytes
-        @test try_decode_exact(MemoryView(UInt8[]), Empty, LittleEndian()) === Empty()
-        @test try_decode_exact(MemoryView([0x00]), Empty, LittleEndian()) === DecodeError(TrailingData)
         # Memory that `MemoryView` can view
         @test try_decode_exact([0x01, 0x02], UInt16, BigEndian()) === 0x0102
         @test decode_exact([0x00, 0x01, 0x02], 2, UInt16, BigEndian()) === 0x0102
@@ -1221,7 +1317,6 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         @test try_load_exact(io, 1, UInt8, BigEndian()) === DecodeError(EndOfInput)
         @test try_load_exact(io, 0, UInt8, BigEndian()) === DecodeError(EndOfInput)
         @test_throws ArgumentError try_load_exact(io, -1, UInt8, BigEndian())
-        @test try_load_exact(CursorReader([0x01]), 0, Empty, LittleEndian()) === Empty()
         # Invalid data is not consumed
         io = CursorReader([0x02, 0x01])
         @test try_load_exact(io, 1, Bool, LittleEndian()) === DecodeError(InvalidData)
@@ -1380,16 +1475,20 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         @test is_err(try_decode(MemoryView([valid; [0x03, 0x00, 0x02, 0x03]]), Outer, BigEndian()), InvalidData)
         @test decode_into!(MemoryView(Vector{Outer}(undef, 3)), MemoryView([valid; valid; valid; breaks_invariant]), BigEndian()) == (1, 8)
 
-        # A struct without fields is encoded in zero bytes
-        @test max_encoded_size(Empty, LittleEndian()) == 0
-        @test try_decode_n(MemoryView(UInt8[]), Empty, LittleEndian()) === (Empty(), 0)
-        @test decode_next(MemoryView([0x01]), 2, Empty, BigEndian()) === (Empty(), 2)
-        @test encode!(MemoryView(UInt8[]), Empty(), BigEndian()) == 0
+        # Types of size zero are not supported, also by the bulk functions, which
+        # divide by the size
+        for e in (LittleEndian(), BigEndian())
+            @test_throws ArgumentError encode!(MemoryView(UInt8[]), Empty(), e)
+            @test_throws ArgumentError encode_into!(MemoryView(UInt8[0x00]), MemoryView([Empty()]), e)
+            @test_throws ArgumentError store_all(VecWriter(), MemoryView([Empty()]), e)
+            @test_throws ArgumentError load_into!(CursorReader([0x00]), MemoryView([Empty()]), e)
+        end
 
         # Structs that can't be bits types
         for T in (
                 Padded, LoadableWithBool, WithChar, WithPlain, WithPadded, Misaligned,
-                TrailingPadding, MisalignedNested, WithU256, WithU24, (HAS_NARROW ? (WithNarrow,) : ())...,
+                TrailingPadding, MisalignedNested, WithU256, WithU24, Empty, WithEmpty,
+                (HAS_NARROW ? (WithNarrow,) : ())...,
             )
             @test_throws ArgumentError max_encoded_size(T, LittleEndian())
             @test_throws ArgumentError try_decode(MemoryView(zeros(UInt8, 16)), T, BigEndian())

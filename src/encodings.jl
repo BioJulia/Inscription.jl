@@ -37,6 +37,10 @@ A hand-written codec for `T` and an encoding type `E` consists of four methods:
 * [`codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{T}, ::E)`](@ref codec_try_decode)
 * [`codec_encode!(mem::MutableMemoryView{UInt8}, x::T, ::E)`](@ref codec_encode!)
 
+Optionally, it can also implement
+[`codec_bytes_needed(mem::ImmutableMemoryView{UInt8}, ::Type{T}, ::E)`](@ref codec_bytes_needed),
+so that loading a `T` doesn't wait for more bytes than it needs.
+
 A codec must be defined by the owner of either `T` or `E`, so as not to commit type
 piracy.
 

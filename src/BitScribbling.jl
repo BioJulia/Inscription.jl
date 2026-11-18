@@ -64,6 +64,7 @@ public Little,
     codec_max_encoded_size,
     codec_encoded_size,
     codec_try_decode,
+    codec_bytes_needed,
     codec_encode!
 
 include("encodings.jl")

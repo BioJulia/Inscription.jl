@@ -24,6 +24,21 @@ codec_encoded_size(c::Char, ::UTF8) = ncodeunits(c)
     return (reinterpret(Char, u), n)
 end
 
+# The encoding ends at the first byte that is not a continuation byte, or at the length
+# that the lead byte allows, as in `codec_try_decode`. The byte that ends it early decides
+# the result too.
+@inline function codec_bytes_needed(mem::ImmutableMemoryView{UInt8}, ::Type{Char}, ::UTF8)::Int
+    isempty(mem) && return 1
+    lead = @inbounds mem[1]
+    (lead < 0xc0 || lead ≥ 0xf8) && return 1
+    max_len = lead < 0xe0 ? 2 : lead < 0xf0 ? 3 : 4
+    for k in 2:max_len
+        k > length(mem) && return k
+        (@inbounds mem[k]) & 0xc0 == 0x80 || return k
+    end
+    return max_len
+end
+
 # Writes the code units of `c` as they are, without validating it.
 @inline function codec_encode!(mem::MutableMemoryView{UInt8}, c::Char, ::UTF8)::Union{Int, EncodeError}
     u = reinterpret(UInt32, c)

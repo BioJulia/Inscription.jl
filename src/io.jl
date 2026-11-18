@@ -14,12 +14,17 @@ If the data does not hold a complete, valid encoding of a `T`, return a
 
 A load either consumes a whole encoding and returns a value, or consumes nothing.
 
-Throw an `IOError` of kind `BufferTooShort` if the buffer capacity of `io` is smaller
-than [`max_encoded_size(T, enc)`](@ref max_encoded_size). This is a property of how
-`io` was constructed, not of its data, and never happens for readers that can expand
-their buffer, such as those returned by `BufferIO.expandable`.
-Note that with such a too-small reader, `try_load` may still return a `DecodeError`
-if the data ends before the buffer is filled.
+`try_load` waits until the bytes buffered in `io` decide the value, or `io` reaches EOF.
+For most types, that is when [`max_encoded_size(T, enc)`](@ref max_encoded_size) bytes
+are buffered. A hand-written codec can decide with fewer bytes by implementing
+[`codec_bytes_needed`](@ref). For example, a `Char` with [`UTF8`](@ref) waits only for
+the bytes of the next character, and the byte after it if the character is malformed.
+
+Throw an `IOError` of kind `BufferTooShort` if `io` must buffer more bytes than its
+capacity. This can only happen if the capacity is smaller than `max_encoded_size(T, enc)`,
+and never happens for readers that can expand their buffer, such as those returned by
+`BufferIO.expandable`. With such a too-small reader, whether it happens may depend on
+the data, e.g. if the data ends first.
 
 See also: [`load`](@ref), [`try_decode`](@ref), [`load_into!`](@ref)
 
@@ -43,7 +48,7 @@ DecodeError(BitScribbling.DecodeErrorKinds.EndOfInput)
 @inline function try_load(io::AbstractBufReader, ::Type{T}, enc::Encoding)::Union{T, DecodeError} where {T}
     buffer = get_buffer(io)::ImmutableMemoryView{UInt8}
     if length(buffer) < max_encoded_size(T, enc)
-        buffer = @noinline buffer_value(io, max_encoded_size(T, enc))
+        (buffer, _) = @noinline buffer_decided(io, T, enc)
     end
     result = try_decode_sized(buffer, 1, T, enc)
     result isa DecodeError && return result
@@ -52,9 +57,33 @@ DecodeError(BitScribbling.DecodeErrorKinds.EndOfInput)
     return x
 end
 
-# Buffer at least n bytes, or everything up to EOF. Either way, decoding from the
-# result gives the right answer: with n bytes, rule 4 of `try_decode`'s contract means
-# more bytes can't change it, and at EOF the buffer is the complete input.
+# Buffer bytes until the first T in the buffer of `io` is decided, or `io` is at EOF.
+# Return the buffer, and whether it is the complete input, i.e. `io` is at EOF.
+# Either way, decoding from the buffer gives the right answer: the bytes that decide it
+# are buffered, by the contract of `codec_bytes_needed`, or the buffer is all the input.
+# Rule 4 of `codec_try_decode` bounds the bytes needed by `max_encoded_size`, so the
+# loop ends, also if `codec_bytes_needed` breaks its contract.
+function buffer_decided(
+        io::AbstractBufReader, ::Type{T}, enc::Encoding
+    )::Tuple{ImmutableMemoryView{UInt8}, Bool} where {T}
+    max_size = max_encoded_size(T, enc)
+    buffer = get_buffer(io)::ImmutableMemoryView{UInt8}
+    while length(buffer) < max_size
+        needed = min(bytes_needed(buffer, T, enc), max_size)
+        needed ≤ length(buffer) && break
+        # Throws `BufferTooShort` if the capacity of `io` is smaller than `needed`
+        new_buffer = get_nonempty_buffer(io, needed)
+        # nothing means EOF before `needed` bytes could be buffered
+        new_buffer === nothing && return (get_buffer(io)::ImmutableMemoryView{UInt8}, true)
+        # Check, so that a reader that breaks the contract of `get_nonempty_buffer` can't
+        # make this loop forever
+        length(new_buffer) < needed && throw_short_buffer_error(io, needed, length(new_buffer))
+        buffer = new_buffer
+    end
+    return (buffer, false)
+end
+
+# Buffer at least n bytes, or everything up to EOF.
 # `get_nonempty_buffer` throws `BufferTooShort` if the capacity of `io` is smaller than n.
 function buffer_value(io::AbstractBufReader, n::Int)::ImmutableMemoryView{UInt8}
     buffer = get_nonempty_buffer(io, n)
@@ -251,7 +280,9 @@ function write_buffer(io::AbstractBufWriter, n::Int)::MutableMemoryView{UInt8}
     return buffer
 end
 
-@noinline function throw_short_buffer_error(io::AbstractBufWriter, n::Int, buffer_length::Int)
+@noinline function throw_short_buffer_error(
+        io::Union{AbstractBufReader, AbstractBufWriter}, n::Int, buffer_length::Int
+    )
     return error(
         "`get_nonempty_buffer(io, $n)` for `$(typeof(io))` broke its contract: it returned " *
             "a buffer of $buffer_length bytes, fewer than the $n requested"

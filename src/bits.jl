@@ -40,6 +40,7 @@ encoded or decoded. If they don't hold, an `ArgumentError` is thrown:
 * The bit width of each primitive field is a power of two, and at least 8, as for
   `UInt8`, `Float32` or `Int128`. So a field can't be e.g. a `primitive type Foo 24 end`.
 * `T` has no padding on any platform.
+* `T` is not of size zero, so it can't be e.g. a struct without fields.
 
 Whether a struct has padding depends on the alignment of its fields, which depends on
 the platform and the Julia version. For example, `UInt64` is aligned to 8 bytes on
@@ -263,6 +264,9 @@ Base.@assume_effects :foldable function bits_type_error(
     isprimitivetype(T) && return nothing
     if !(isstructtype(T) && isbitstype(T))
         return "`bits_kind($T)` is `$(kind_name(kind))`, but `$T` is neither a primitive type nor an isbits struct"
+    end
+    if iszero(sizeof(T))
+        return "`$T` has a size of zero bytes, so it can't be `$(kind_name(kind))`: types of size zero are not supported"
     end
     # The offset of the next field in the strictest layout, see the docstring of `BitsKind`
     offset = 0
