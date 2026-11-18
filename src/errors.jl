@@ -15,11 +15,13 @@ module DecodeErrorKinds
     * [`DecodeErrorKinds.EndOfInput`](@ref)
     * [`DecodeErrorKinds.Truncated`](@ref)
     * [`DecodeErrorKinds.InvalidData`](@ref)
+    * [`DecodeErrorKinds.TrailingData`](@ref)
     """
     @enum DecodeErrorKind::UInt8 begin
         EndOfInput
         Truncated
         InvalidData
+        TrailingData
     end
 
     """
@@ -43,10 +45,20 @@ module DecodeErrorKinds
     """
     InvalidData
 
-    public DecodeErrorKind, EndOfInput, Truncated, InvalidData
+    """
+        TrailingData
+
+    A value was decoded, but the input continues after its encoding, where the input
+    should hold exactly one encoded value. Only returned by the functions that decode
+    exactly, such as [`try_decode_exact`](@ref BitScribbling.try_decode_exact) and
+    [`try_load_exact`](@ref BitScribbling.try_load_exact).
+    """
+    TrailingData
+
+    public DecodeErrorKind, EndOfInput, Truncated, InvalidData, TrailingData
 end
 
-using .DecodeErrorKinds: DecodeErrorKind, EndOfInput, Truncated, InvalidData
+using .DecodeErrorKinds: DecodeErrorKind, EndOfInput, Truncated, InvalidData, TrailingData
 
 """
     DecodeError <: Exception
@@ -92,6 +104,8 @@ function Base.showerror(io::IO, err::DecodeError)
         "Truncated input: the input ended partway through an encoded value"
     elseif kind === InvalidData
         "Invalid data: the bytes are not a valid encoding of the requested type"
+    elseif kind === TrailingData
+        "Trailing data: the input continues after the encoded value"
     else
         "Unknown decoding error"
     end

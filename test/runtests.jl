@@ -2,7 +2,7 @@ using Test
 using BitScribbling
 using BitScribbling: DecodeErrorKinds, EncodeErrorKinds, Little, Big
 using BitScribbling: bits_kind, BitsLoadable, BitsStorable, ManualCodec, is_valid_bits, as_unsigned
-using BitScribbling.DecodeErrorKinds: EndOfInput, Truncated, InvalidData
+using BitScribbling.DecodeErrorKinds: EndOfInput, Truncated, InvalidData, TrailingData
 using BitScribbling.EncodeErrorKinds: InsufficientSpace, InvalidValue
 using BufferIO
 using BufferIO.Testing: BoundedReader, BoundedWriter, ChunkedReader
@@ -1049,6 +1049,25 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
                     expected_next = expected isa DecodeError ? expected : (expected[1], i + expected[2])
                     @test isequal(try_decode_next(mem, i, T, e), expected_next)
                     @test isequal(try_decode_next(ImmutableMemoryView(mem), i, T, e), expected_next)
+                    # Decoding exactly is decoding, and checking that no bytes remain
+                    exact = if expected isa DecodeError
+                        expected
+                    elseif expected[2] == len - i + 1
+                        expected[1]
+                    else
+                        DecodeError(TrailingData)
+                    end
+                    @test isequal(try_decode_exact(mem, i, T, e), exact)
+                    @test isequal(try_decode_exact(mem[i:end], T, e), exact)
+                    if exact isa DecodeError
+                        @test_throws exact decode_exact(mem, i, T, e)
+                    else
+                        @test isequal(decode_exact(mem, i, T, e), exact)
+                    end
+                    # ... and so is loading exactly, which consumes nothing on errors
+                    io = CursorReader(collect(mem[i:end]))
+                    @test isequal(try_load_exact(io, len - i + 1, T, e), exact)
+                    @test length(get_buffer(io)) == (exact isa DecodeError ? len - i + 1 : 0)
                     if expected isa DecodeError
                         @test isequal(try_decode(mem, i, T, e), expected)
                         @test_throws DecodeError decode(mem, i, T, e)
@@ -1099,6 +1118,8 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
                 @test_throws LightBoundsError decode(mem, i, T, e)
                 @test_throws LightBoundsError try_decode_next(mem, i, T, e)
                 @test_throws LightBoundsError decode_next(mem, i, T, e)
+                @test_throws LightBoundsError try_decode_exact(mem, i, T, e)
+                @test_throws LightBoundsError decode_exact(mem, i, T, e)
                 @test_throws LightBoundsError try_encode!(mem, i, x, e)
                 @test_throws LightBoundsError encode!(mem, i, x, e)
             end
@@ -1163,6 +1184,61 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
             @test encode!(MemoryView(a), x, e) === try_encode!(MemoryView(b), x, e)
             @test a == b
         end
+    end
+
+    @testset "Exact decoding and loading" begin
+        @test try_decode_exact(MemoryView([0x01, 0x02]), UInt16, BigEndian()) === 0x0102
+        @test try_decode_exact(MemoryView([0x01, 0x02, 0x03]), UInt16, BigEndian()) === DecodeError(TrailingData)
+        @test try_decode_exact(MemoryView([0x01]), UInt16, BigEndian()) === DecodeError(Truncated)
+        @test try_decode_exact(MemoryView(UInt8[]), UInt16, BigEndian()) === DecodeError(EndOfInput)
+        # The errors of decoding come first
+        @test try_decode_exact(MemoryView([0x02, 0x00]), Bool, LittleEndian()) === DecodeError(InvalidData)
+        @test_throws DecodeError(TrailingData) decode_exact(MemoryView([0x01, 0x02, 0x03]), UInt16, BigEndian())
+        @test_throws DecodeError(InvalidData) decode_exact(MemoryView([0x02, 0x00]), Bool, LittleEndian())
+        # Variable-length encodings
+        @test try_decode_exact(MemoryView("€"), Char, UTF8()) === '€'
+        @test try_decode_exact(MemoryView("€a"), Char, UTF8()) === DecodeError(TrailingData)
+        @test try_decode_exact(MemoryView("a€"), 2, Char, UTF8()) === '€'
+        @test decode_exact(MemoryView("\xe2\x82"), Char, UTF8()) === '\xe2\x82'
+        # Encodings of zero bytes
+        @test try_decode_exact(MemoryView(UInt8[]), Empty, LittleEndian()) === Empty()
+        @test try_decode_exact(MemoryView([0x00]), Empty, LittleEndian()) === DecodeError(TrailingData)
+        # Memory that `MemoryView` can view
+        @test try_decode_exact([0x01, 0x02], UInt16, BigEndian()) === 0x0102
+        @test decode_exact([0x00, 0x01, 0x02], 2, UInt16, BigEndian()) === 0x0102
+        @test_throws ArgumentError try_decode_exact("ab", UInt16, BigEndian())
+
+        io = CursorReader([0x00, 0x01, 0x02, 0x03, 0x04])
+        @test try_load_exact(io, 2, UInt16, BigEndian()) === 0x0001
+        @test try_load_exact(io, 3, UInt16, BigEndian()) === DecodeError(TrailingData)
+        @test try_load_exact(io, 1, UInt16, BigEndian()) === DecodeError(Truncated)
+        # EOF within the bytes
+        @test try_load_exact(io, 4, UInt8, BigEndian()) === DecodeError(Truncated)
+        @test length(get_buffer(io)) == 3 # nothing consumed
+        @test_throws DecodeError(TrailingData) load_exact(io, 2, UInt8, BigEndian())
+        @test load_exact(io, 1, UInt8, BigEndian()) === 0x02
+        @test load_exact(io, 2, UInt16, BigEndian()) === 0x0304
+        @test try_load_exact(io, 1, UInt8, BigEndian()) === DecodeError(EndOfInput)
+        @test try_load_exact(io, 0, UInt8, BigEndian()) === DecodeError(EndOfInput)
+        @test_throws ArgumentError try_load_exact(io, -1, UInt8, BigEndian())
+        @test try_load_exact(CursorReader([0x01]), 0, Empty, LittleEndian()) === Empty()
+        # Invalid data is not consumed
+        io = CursorReader([0x02, 0x01])
+        @test try_load_exact(io, 1, Bool, LittleEndian()) === DecodeError(InvalidData)
+        @test length(get_buffer(io)) == 2
+        # Bytes straddling fills
+        io = ChunkedReader([[0xe2], [0x82], [0xac, 0x61]])
+        @test try_load_exact(io, 3, Char, UTF8()) === '€'
+        @test try_load_exact(io, 1, Char, UTF8()) === 'a'
+        @test try_load_exact(io, 1, Char, UTF8()) === DecodeError(EndOfInput)
+        for max_fill in 1:5
+            io = BoundedReader(collect(UInt8, 1:12), 6; max_fill)
+            @test [load_exact(io, 4, UInt32, BigEndian()) for _ in 1:3] == [0x01020304, 0x05060708, 0x090a0b0c]
+        end
+        # More bytes than the buffer capacity
+        @test_throws IOError try_load_exact(BoundedReader(zeros(UInt8, 8), 2), 4, UInt32, LittleEndian())
+        # More bytes than `max_encoded_size`
+        @test try_load_exact(CursorReader(zeros(UInt8, 8)), 8, UInt32, LittleEndian()) === DecodeError(TrailingData)
     end
 
     @testset "Values that can't be encoded" begin
@@ -1363,6 +1439,7 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         encode_inbounds!(mem, i, x, e) = @inbounds encode!(mem, i, x, e)
         try_encode_inbounds!(mem, i, x, e) = @inbounds try_encode!(mem, i, x, e)
         start_inbounds(mem, ::Type{T}, e) where {T} = @inbounds decode(mem, T, e)
+        exact_inbounds(mem, i, ::Type{T}, e) where {T} = @inbounds decode_exact(mem, i, T, e)
         little_inbounds(mem, i) = @inbounds Little.decode_next(mem, i, UInt16)
 
         # In bounds, the results are the same as without `@inbounds`
@@ -1372,6 +1449,9 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         end
         @test decode_inbounds(mem, 2, UInt32, BigEndian()) === 0x02030405
         @test start_inbounds(mem, UInt16, BigEndian()) === 0x0102
+        @test exact_inbounds(mem, 4, UInt16, BigEndian()) === 0x0405
+        # Whether bytes remain is always checked
+        @test_throws DecodeError(TrailingData) exact_inbounds(mem, 1, UInt16, BigEndian())
         @test little_inbounds(mem, 4) === (0x0504, 6)
         v = zeros(UInt8, 6)
         @test encode_inbounds!(MemoryView(v), 3, 0x01020304, BigEndian()) === 4
@@ -1546,6 +1626,12 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
             @test M.decode(MemoryView(bytes), 4, UInt16) === decode(MemoryView(bytes), 4, UInt16, E)
             @test M.try_decode_next(MemoryView(bytes), 2, UInt32) === try_decode_next(MemoryView(bytes), 2, UInt32, E)
             @test M.decode_next(MemoryView(bytes), 4, UInt16) === decode_next(MemoryView(bytes), 4, UInt16, E)
+            @test M.try_decode_exact(MemoryView(bytes), 2, UInt32) === try_decode_exact(MemoryView(bytes), 2, UInt32, E)
+            @test M.try_decode_exact(MemoryView(bytes), UInt16) === DecodeError(TrailingData)
+            @test M.decode_exact(MemoryView(bytes)[1:2], UInt16) === decode_exact(MemoryView(bytes)[1:2], UInt16, E)
+            @test M.decode_exact(MemoryView(bytes), 4, UInt16) === decode_exact(MemoryView(bytes), 4, UInt16, E)
+            @test M.load_exact(CursorReader(bytes), 4, UInt32) === load_exact(CursorReader(bytes), 4, UInt32, E)
+            @test M.try_load_exact(CursorReader(bytes), 5, UInt32) === DecodeError(TrailingData)
             a = zeros(UInt8, 4)
             b = zeros(UInt8, 4)
             @test M.encode!(MemoryView(a), 0x0102) == encode!(MemoryView(b), 0x0102, E)
@@ -1581,7 +1667,7 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         @test isbitstype(DecodeError)
         @test sizeof(DecodeError) == 1
         @test DecodeError <: Exception
-        for kind in (EndOfInput, Truncated, InvalidData)
+        for kind in (EndOfInput, Truncated, InvalidData, TrailingData)
             str = sprint(showerror, DecodeError(kind))
             @test startswith(str, "DecodeError: ")
         end
@@ -1621,7 +1707,18 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
                 store(io, i % UInt32, LittleEndian())
             end; nothing
         )
+        function sum_exact(io)
+            s = UInt64(0)
+            while true
+                x = try_load_exact(io, 4, UInt32, BigEndian())
+                x isa DecodeError && break
+                s += x
+            end
+            return s
+        end
         data = rand(UInt8, 1001)
+        sum_exact(CursorReader(data))
+        @test (@allocated sum_exact(CursorReader(data))) ≤ 64
         sum_loads(CursorReader(data))
         sum_chars(CursorReader(data))
         @test (@allocated sum_loads(CursorReader(data))) ≤ 64 # the reader itself

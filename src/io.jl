@@ -86,6 +86,84 @@ function load(io::AbstractBufReader, ::Type{T}, enc::Encoding)::T where {T}
 end
 
 """
+    try_load_exact(io::AbstractBufReader, nbytes::Integer, ::Type{T}, enc::Encoding)::Union{T, DecodeError}
+
+Load a value of type `T` from the next `nbytes` bytes of `io`, which must be exactly one
+encoding of a `T`, as for [`try_decode_exact`](@ref). On success, consume the `nbytes`
+bytes. Otherwise, return a [`DecodeError`](@ref) and consume nothing.
+
+Use it to load a value whose size is known from the data, such as a field with a length
+prefix, or a column of a fixed width. Unlike [`try_load`](@ref), it waits for no more
+than `nbytes` bytes, and doesn't need the codec to find the end of the encoding.
+
+The error kind is:
+* `EndOfInput` if `io` is at EOF;
+* `Truncated` if `io` reaches EOF before `nbytes` bytes;
+* otherwise, the error of `try_decode_exact` for the `nbytes` bytes. Since an encoding
+  is at most [`max_encoded_size(T, enc)`](@ref max_encoded_size) bytes, a larger
+  `nbytes` always gives an error.
+
+Throw an `ArgumentError` if `nbytes` is negative, and an `IOError` of kind
+`BufferTooShort` if the buffer capacity of `io` is smaller than `nbytes`.
+
+See also: [`load_exact`](@ref)
+
+# Examples
+```jldoctest
+julia> io = CursorReader("éab");
+
+julia> try_load_exact(io, 2, Char, UTF8())
+'é': Unicode U+00E9 (category Ll: Letter, lowercase)
+
+julia> try_load_exact(io, 2, Char, UTF8()) # 'a' is followed by 'b'
+DecodeError(BitScribbling.DecodeErrorKinds.TrailingData)
+
+julia> try_load_exact(io, 1, Char, UTF8()) # nothing was consumed
+'a': ASCII/Unicode U+0061 (category Ll: Letter, lowercase)
+
+julia> try_load_exact(io, 2, Char, UTF8())
+DecodeError(BitScribbling.DecodeErrorKinds.Truncated)
+```
+"""
+@inline function try_load_exact(
+        io::AbstractBufReader, nbytes::Integer, ::Type{T}, enc::Encoding
+    )::Union{T, DecodeError} where {T}
+    nbytes = Int(nbytes)::Int
+    nbytes < 0 && throw_negative_nbytes_error(nbytes)
+    buffer = get_buffer(io)::ImmutableMemoryView{UInt8}
+    if length(buffer) < nbytes
+        buffer = @noinline buffer_value(io, nbytes)
+        # `buffer_value` returns fewer bytes only at EOF
+        length(buffer) < nbytes && return DecodeError(isempty(buffer) ? EndOfInput : Truncated)
+    end
+    x = @try_return try_decode_exact((@inbounds buffer[1:nbytes]), T, enc)
+    @inbounds consume(io, nbytes)
+    return x
+end
+
+@noinline function throw_negative_nbytes_error(nbytes::Int)
+    throw(ArgumentError("`nbytes` must not be negative, but it is $nbytes"))
+end
+
+"""
+    load_exact(io::AbstractBufReader, nbytes::Integer, ::Type{T}, enc::Encoding)::T
+
+Like [`try_load_exact`](@ref), but throw the [`DecodeError`](@ref) instead of returning
+it.
+
+# Examples
+```jldoctest
+julia> load_exact(CursorReader([0x00, 0x01]), 2, UInt16, BigEndian())
+0x0001
+```
+"""
+function load_exact(io::AbstractBufReader, nbytes::Integer, ::Type{T}, enc::Encoding)::T where {T}
+    result = try_load_exact(io, Int(nbytes)::Int, T, enc)
+    result isa DecodeError && throw_decode_error(result)
+    return result
+end
+
+"""
     try_store(io::AbstractBufWriter, x, enc::Encoding)::Union{Int, EncodeError}
 
 Store `x` into `io` with the encoding `enc`, and return the number of bytes written.

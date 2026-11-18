@@ -36,10 +36,11 @@ end
 end
 
 # The `try_` functions ignore `@inbounds`, and the others propagate it, as their methods
-# for `MemoryView` do.
+# for `MemoryView` do. Index arguments are converted to `Int` here, where they enter the
+# package, so only `Int` indices are passed on.
 
 @inline function try_decode(mem, i::Integer, ::Type{T}, enc::Encoding) where {T}
-    return try_decode(input_bytes(mem), i, T, enc)
+    return try_decode(input_bytes(mem), Int(i)::Int, T, enc)
 end
 
 @inline function try_decode(mem, ::Type{T}, enc::Encoding) where {T}
@@ -47,7 +48,7 @@ end
 end
 
 Base.@propagate_inbounds function decode(mem, i::Integer, ::Type{T}, enc::Encoding) where {T}
-    return decode(input_bytes(mem), i, T, enc)
+    return decode(input_bytes(mem), Int(i)::Int, T, enc)
 end
 
 Base.@propagate_inbounds function decode(mem, ::Type{T}, enc::Encoding) where {T}
@@ -55,15 +56,31 @@ Base.@propagate_inbounds function decode(mem, ::Type{T}, enc::Encoding) where {T
 end
 
 @inline function try_decode_next(mem, i::Integer, ::Type{T}, enc::Encoding) where {T}
-    return try_decode_next(input_bytes(mem), i, T, enc)
+    return try_decode_next(input_bytes(mem), Int(i)::Int, T, enc)
 end
 
 Base.@propagate_inbounds function decode_next(mem, i::Integer, ::Type{T}, enc::Encoding) where {T}
-    return decode_next(input_bytes(mem), i, T, enc)
+    return decode_next(input_bytes(mem), Int(i)::Int, T, enc)
+end
+
+@inline function try_decode_exact(mem, i::Integer, ::Type{T}, enc::Encoding) where {T}
+    return try_decode_exact(input_bytes(mem), Int(i)::Int, T, enc)
+end
+
+@inline function try_decode_exact(mem, ::Type{T}, enc::Encoding) where {T}
+    return try_decode_exact(input_bytes(mem), T, enc)
+end
+
+Base.@propagate_inbounds function decode_exact(mem, i::Integer, ::Type{T}, enc::Encoding) where {T}
+    return decode_exact(input_bytes(mem), Int(i)::Int, T, enc)
+end
+
+Base.@propagate_inbounds function decode_exact(mem, ::Type{T}, enc::Encoding) where {T}
+    return decode_exact(input_bytes(mem), T, enc)
 end
 
 @inline function try_encode!(mem, i::Integer, x, enc::Encoding)
-    return try_encode!(output_bytes(mem), i, x, enc)
+    return try_encode!(output_bytes(mem), Int(i)::Int, x, enc)
 end
 
 @inline function try_encode!(mem, x, enc::Encoding)
@@ -71,7 +88,7 @@ end
 end
 
 Base.@propagate_inbounds function encode!(mem, i::Integer, x, enc::Encoding)
-    return encode!(output_bytes(mem), i, x, enc)
+    return encode!(output_bytes(mem), Int(i)::Int, x, enc)
 end
 
 Base.@propagate_inbounds function encode!(mem, x, enc::Encoding)

@@ -86,7 +86,8 @@ to the end of `mem` as the complete input. Return the value, or a
 [`DecodeError`](@ref).
 
 To also get the index after the encoding, e.g. for types whose encodings vary in size,
-use [`try_decode_next`](@ref).
+use [`try_decode_next`](@ref). Bytes after the encoding are ignored. To require that the
+encoding ends at the end of `mem`, use [`try_decode_exact`](@ref).
 
 The result is the same as decoding from `mem[i:end]`, but without creating the slice.
 `i` must be in `1:length(mem)+1`, or a `LightBoundsError` is thrown.
@@ -144,7 +145,7 @@ Therefore, the only possible error is `EndOfInput`, when no bytes remain.
 @inline function try_decode(
         mem::MemoryView{UInt8}, i::Integer, ::Type{T}, enc::Encoding
     )::Union{T, DecodeError} where {T}
-    (x, _) = @try_return try_decode_sized(mem, i, T, enc)
+    (x, _) = @try_return try_decode_sized(mem, Int(i)::Int, T, enc)
     return x
 end
 
@@ -185,7 +186,7 @@ Base.@propagate_inbounds function decode(
         mem::MemoryView{UInt8}, i::Integer, ::Type{T}, enc::Encoding
     )::T where {T}
     # Calls `try_decode_sized` directly, so that `@inbounds` reaches its checks
-    result = try_decode_sized(mem, i, T, enc)
+    result = try_decode_sized(mem, Int(i)::Int, T, enc)
     result isa DecodeError && throw_decode_error(result)
     return first(result)
 end
@@ -222,8 +223,9 @@ DecodeError(BitScribbling.DecodeErrorKinds.EndOfInput)
 @inline function try_decode_next(
         mem::MemoryView{UInt8}, i::Integer, ::Type{T}, enc::Encoding
     )::Union{Tuple{T, Int}, DecodeError} where {T}
+    i = Int(i)::Int
     (x, n) = @try_return try_decode_sized(mem, i, T, enc)
-    return (x, Int(i)::Int + n)
+    return (x, i + n)
 end
 
 """
@@ -254,21 +256,98 @@ julia> decode_chars(MemoryView("a€!"))
 Base.@propagate_inbounds function decode_next(
         mem::MemoryView{UInt8}, i::Integer, ::Type{T}, enc::Encoding
     )::Tuple{T, Int} where {T}
+    i = Int(i)::Int
     # Calls `try_decode_sized` directly, so that `@inbounds` reaches its checks
     result = try_decode_sized(mem, i, T, enc)
     result isa DecodeError && throw_decode_error(result)
     (x, n) = result
-    return (x, Int(i)::Int + n)
+    return (x, i + n)
+end
+
+"""
+    try_decode_exact(mem, [i::Integer,] ::Type{T}, enc::Encoding)::Union{T, DecodeError}
+
+Like [`try_decode`](@ref), but the bytes from `i` (default: 1) to the end of `mem` must
+be exactly one encoding of a `T`. If the encoding ends before the end of `mem`, return a
+[`DecodeError`](@ref) of kind `TrailingData`.
+
+The errors of decoding the value come first: `TrailingData` is only returned if a value
+was decoded. Like `try_decode`, this function ignores `@inbounds`.
+
+Use it where the input, or a part of it whose size is known, holds a single value, e.g.
+to parse a value from a whole string, or from a field of a known size.
+See also [`try_load_exact`](@ref).
+
+# Examples
+```jldoctest
+julia> try_decode_exact(MemoryView([0x01, 0x02]), UInt16, BigEndian())
+0x0102
+
+julia> try_decode_exact(MemoryView([0x01, 0x02, 0x03]), UInt16, BigEndian())
+DecodeError(BitScribbling.DecodeErrorKinds.TrailingData)
+
+julia> try_decode_exact(MemoryView([0x01, 0x02, 0x03]), 2, UInt16, BigEndian())
+0x0203
+
+julia> try_decode_exact(MemoryView([0x01]), UInt16, BigEndian())
+DecodeError(BitScribbling.DecodeErrorKinds.Truncated)
+```
+"""
+@inline function try_decode_exact(
+        mem::MemoryView{UInt8}, i::Integer, ::Type{T}, enc::Encoding
+    )::Union{T, DecodeError} where {T}
+    i = Int(i)::Int
+    (x, n) = @try_return try_decode_sized(mem, i, T, enc)
+    # `try_decode_sized` checked that `i` is valid and that `n` bytes remain from it
+    n == length(mem) - i + 1 || return DecodeError(TrailingData)
+    return x
+end
+
+@inline function try_decode_exact(mem::MemoryView{UInt8}, ::Type{T}, enc::Encoding) where {T}
+    return try_decode_exact(mem, 1, T, enc)
+end
+
+"""
+    decode_exact(mem, [i::Integer,] ::Type{T}, enc::Encoding)::T
+
+Like [`try_decode_exact`](@ref), but throw the [`DecodeError`](@ref) instead of returning
+it. Supports `@inbounds` in the same way as [`decode`](@ref). Whether the encoding ends
+at the end of `mem` is always checked, also in an `@inbounds` context.
+
+# Examples
+```jldoctest
+julia> decode_exact(MemoryView("é"), Char, UTF8())
+'é': Unicode U+00E9 (category Ll: Letter, lowercase)
+
+julia> decode_exact(MemoryView("éa"), Char, UTF8())
+ERROR: DecodeError: Trailing data: the input continues after the encoded value
+[...]
+```
+"""
+Base.@propagate_inbounds function decode_exact(
+        mem::MemoryView{UInt8}, i::Integer, ::Type{T}, enc::Encoding
+    )::T where {T}
+    i = Int(i)::Int
+    # Calls `try_decode_sized` directly, so that `@inbounds` reaches its checks
+    result = try_decode_sized(mem, i, T, enc)
+    result isa DecodeError && throw_decode_error(result)
+    (x, n) = result
+    n == length(mem) - i + 1 || throw_decode_error(DecodeError(TrailingData))
+    return x
+end
+
+Base.@propagate_inbounds function decode_exact(mem::MemoryView{UInt8}, ::Type{T}, enc::Encoding) where {T}
+    return decode_exact(mem, 1, T, enc)
 end
 
 # Decode a T from `mem[i:end]`, and return it with the number of bytes used, or a
-# `DecodeError`. The public decoding functions are built on this.
+# `DecodeError`. The public decoding functions are built on this. They convert their
+# index argument to an `Int`, so the internal functions only handle `Int` indices.
 # Its checks are in `@boundscheck` blocks, so an `@inbounds` in a caller that propagates
 # it, such as `decode`, skips them. The `try_` functions don't propagate it.
 @inline function try_decode_sized(
-        mem::MemoryView{UInt8}, i::Integer, ::Type{T}, enc::Encoding
+        mem::MemoryView{UInt8}, i::Int, ::Type{T}, enc::Encoding
     )::Union{Tuple{T, Int}, DecodeError} where {T}
-    i = Int(i)::Int
     kind = codec_kind(T, enc)
     if kind isa ManualCodec
         @boundscheck check_start_index(mem, i)
@@ -333,7 +412,7 @@ EncodeError(BitScribbling.EncodeErrorKinds.InsufficientSpace)
 @inline function try_encode!(
         mem::MutableMemoryView{UInt8}, i::Integer, x, enc::Encoding
     )::Union{Int, EncodeError}
-    return _try_encode!(mem, i, x, enc)
+    return _try_encode!(mem, Int(i)::Int, x, enc)
 end
 
 @inline function try_encode!(mem::MutableMemoryView{UInt8}, x, enc::Encoding)
@@ -344,9 +423,8 @@ end
 # `@inbounds` in a caller that propagates it, such as `encode!`, skips them.
 # `try_encode!` doesn't propagate it.
 @inline function _try_encode!(
-        mem::MutableMemoryView{UInt8}, i::Integer, x::T, enc::Encoding
+        mem::MutableMemoryView{UInt8}, i::Int, x::T, enc::Encoding
     )::Union{Int, EncodeError} where {T}
-    i = Int(i)::Int
     if codec_kind(T, enc) isa ManualCodec
         @boundscheck check_start_index(mem, i)
         return call_codec_encode!(unsafe_suffix(mem, i), x, enc)
@@ -392,9 +470,10 @@ ERROR: LightBoundsErrors.LightBoundsError: out-of-bounds indexing: `collection[2
 Base.@propagate_inbounds function encode!(
         mem::MutableMemoryView{UInt8}, i::Integer, x::T, enc::Encoding
     )::Int where {T}
+    i = Int(i)::Int
     # Calls `_try_encode!` directly, so that `@inbounds` reaches its checks
     result = _try_encode!(mem, i, x, enc)
-    result isa EncodeError && throw_encode_failure(mem, Int(i)::Int, T, enc, result)
+    result isa EncodeError && throw_encode_failure(mem, i, T, enc, result)
     return result
 end
 
