@@ -79,21 +79,17 @@ end
 const HAS_NARROW = VERSION ≥ v"1.14.0-"
 if HAS_NARROW
     @eval begin
+        # Bit widths that are not a multiple of 8 can't be encoded as their bits with a
+        # byte order, since that would need padding bits
         primitive type U22 22 end
         BitScribbling.bits_kind(::Type{U22}) = BitsLoadable()
         primitive type U5 5 end
         BitScribbling.bits_kind(::Type{U5}) = BitsLoadable()
-        # Encoded in 4 bytes, so loaded as a UInt32
         primitive type U30 30 end
         BitScribbling.bits_kind(::Type{U30}) = BitsLoadable()
-        # Encoded in 4 bytes, so loaded as a UInt32. The top bit must be zero.
-        primitive type S30 30 end
-        BitScribbling.bits_kind(::Type{S30}) = BitsStorable()
-        BitScribbling.is_valid_bits(::Type{S30}, bytes::NTuple{4, UInt8}) = as_unsigned(bytes) < 0x20000000
-        # All ones is invalid
         primitive type S12 12 end
         BitScribbling.bits_kind(::Type{S12}) = BitsStorable()
-        BitScribbling.is_valid_bits(::Type{S12}, bytes::NTuple{2, UInt8}) = as_unsigned(bytes) != 0x0fff
+        BitScribbling.is_valid_bits(::Type{S12}, bytes::NTuple{2, UInt8}) = true
 
         # The design's example of a hand-written codec for a narrow type
         primitive type U29 29 end
@@ -359,9 +355,7 @@ const CODEC_CASES = let
     cases = Any[(T, e) for T in types for e in (LittleEndian(), BigEndian())]
     push!(cases, (Char, UTF8()), (Bool, CBool()), (Char, Latin1()), (Tuple{Char, Char}, Latin1()))
     if HAS_NARROW
-        for T in (U22, U5, U30, S30, S12, U29), e in (LittleEndian(), BigEndian())
-            push!(cases, (T, e))
-        end
+        push!(cases, (U29, LittleEndian()), (U29, BigEndian()))
     end
     cases
 end
@@ -586,30 +580,26 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         @test_throws MethodError try_decode(MemoryView(zeros(UInt8, 2)), NoCheck16, LittleEndian())
     end
 
-    HAS_NARROW && @testset "Narrow primitive types" begin
-        test_odd_bits(U22, [0x01, 0x02, 0x3f], 0x003f0201)
-        test_odd_bits(U5, [0x1f], 0x1f)
-        test_odd_bits(S12, [0xfe, 0x0f], 0x0ffe)
-        test_odd_bits(U30, [0x01, 0x02, 0x03, 0x3f], 0x3f030201)
-        test_odd_bits(S30, [0x01, 0x02, 0x03, 0x1f], 0x1f030201)
-        # Nonzero padding bits are invalid
-        @test is_err(try_decode(MemoryView([0x01, 0x02, 0x40]), U22, LittleEndian()), InvalidData)
-        @test is_err(try_decode(MemoryView([0x40, 0x02, 0x01]), U22, BigEndian()), InvalidData)
-        @test is_err(try_decode(MemoryView([0x20]), U5, LittleEndian()), InvalidData)
-        @test is_err(try_decode(MemoryView([0x00, 0x10]), S12, LittleEndian()), InvalidData)
-        for b in (0x40, 0x80)
-            @test is_err(try_decode(MemoryView([0x01, 0x02, 0x03, b]), U30, LittleEndian()), InvalidData)
-            @test is_err(try_decode(MemoryView([b, 0x03, 0x02, 0x01]), U30, BigEndian()), InvalidData)
-            @test is_err(try_decode(MemoryView([b, 0x00, 0x00, 0x00]), S30, BigEndian()), InvalidData)
+    HAS_NARROW && @testset "Primitive types narrower than whole bytes" begin
+        # Rejected by the byte-order encodings
+        for T in (U22, U5, U30, S12), e in (LittleEndian(), BigEndian())
+            @test_throws ArgumentError max_encoded_size(T, e)
+            @test_throws ArgumentError try_decode(MemoryView(zeros(UInt8, 8)), T, e)
+            @test_throws ArgumentError decode_into!(MemoryView(Vector{T}(undef, 1)), MemoryView(zeros(UInt8, 8)), e)
+            @test_throws ArgumentError try_load(CursorReader(zeros(UInt8, 8)), T, e)
         end
-        @test is_err(try_decode(MemoryView([0x00, 0x00, 0x00, 0x20]), S30, LittleEndian()), InvalidData)
-        @test decode_into!(MemoryView(Vector{U30}(undef, 3)), MemoryView(UInt8[0x3f, 0, 0, 0, 0x40, 0, 0, 0]), BigEndian()) == (1, 4)
-        # Invalid bits
-        @test is_err(try_decode(MemoryView([0xff, 0x0f]), S12, LittleEndian()), InvalidData)
-        # Padding bits are written as zero
-        buf = fill(0xff, 3)
-        @test encode!(MemoryView(buf), decode(MemoryView([0xff, 0xff, 0x3f]), U22, LittleEndian()), LittleEndian()) == 3
-        @test buf == [0xff, 0xff, 0x3f]
+        x = Core.Intrinsics.trunc_int(U22, 0x00012345)
+        @test_throws ArgumentError encode!(MemoryView(zeros(UInt8, 8)), x, LittleEndian())
+        @test_throws ArgumentError try_encoded_size(x, BigEndian())
+        @test_throws ArgumentError store(VecWriter(), x, LittleEndian())
+        message(T) =
+        try
+            max_encoded_size(T, LittleEndian())
+        catch e
+            sprint(showerror, e)
+        end
+        @test occursin("`bits_kind(U22)` is `BitsLoadable`, but the bit width 22 of `U22` is not a multiple of 8", message(U22))
+        @test occursin("`bits_kind(S12)` is `BitsStorable`", message(S12))
 
         # The design's example of a hand-written codec
         io = CursorReader([0x01, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff])

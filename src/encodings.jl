@@ -85,7 +85,22 @@ struct BigEndian <: Encoding end
 """
     Endianness = Union{LittleEndian, BigEndian}
 
-The byte-order encodings.
+The byte-order encodings. They encode fixed-size values of bits types as their bits, in
+the given byte order.
+
+A type `T` can be encoded with them if:
+* `T` has a hand-written codec for each of them, see [`Encoding`](@ref). The built-in
+  codecs are listed there.
+* Or, `bits_kind(T)` is [`BitsLoadable`](@ref) or [`BitsStorable`](@ref), and:
+  - if `T` is a primitive type, its bit width is a multiple of 8. So, e.g., a primitive
+    type with 18 bits is rejected, because its encoding would need padding bits;
+  - if `T` is a struct, it has no padding, and its fields satisfy the requirements
+    listed in [`BitsKind`](@ref).
+  Otherwise, an `ArgumentError` is thrown when a `T` is first encoded or decoded.
+
+The encoding of a value always takes whole bytes. Data in which values are packed at the
+bit level, e.g. one 18-bit value starting in the middle of a byte, can't be decoded with
+this package.
 
 When the byte order is only known at runtime, e.g. from a file header, the endianness
 value is of type `Endianness`. Use a function barrier, so the code that uses it is
