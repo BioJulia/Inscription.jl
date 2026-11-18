@@ -1,8 +1,9 @@
 using Test
 using BitScribbling
-using BitScribbling: DecodeErrorKinds, Little, Big
+using BitScribbling: DecodeErrorKinds, EncodeErrorKinds, Little, Big
 using BitScribbling: bits_kind, BitsLoadable, BitsStorable, ManualCodec, is_valid_bits, as_unsigned
 using BitScribbling.DecodeErrorKinds: EndOfInput, Truncated, InvalidData
+using BitScribbling.EncodeErrorKinds: InsufficientSpace, InvalidValue
 using BufferIO
 using BufferIO.Testing: BoundedReader, BoundedWriter, ChunkedReader
 using MemoryViews: MemoryView, ImmutableMemoryView, MutableMemoryView
@@ -103,6 +104,7 @@ if HAS_NARROW
     for E in (LittleEndian, BigEndian)
         @eval begin
             BitScribbling.codec_max_encoded_size(::Type{U29}, ::$E) = 4
+            BitScribbling.codec_encoded_size(::U29, ::$E) = 4
             function BitScribbling.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{U29}, e::$E)
                 raw = @try_return try_decode(mem, UInt32, e)
                 raw > 0x1fffffff && return DecodeError(InvalidData)
@@ -118,12 +120,13 @@ end
 # A custom encoding defined by a format package
 struct CBool <: Encoding end
 BitScribbling.codec_max_encoded_size(::Type{Bool}, ::CBool) = 1
+BitScribbling.codec_encoded_size(::Bool, ::CBool) = 1
 function BitScribbling.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{Bool}, ::CBool)
     isempty(mem) && return DecodeError(EndOfInput)
     return (!iszero(mem[1]), 1)
 end
 function BitScribbling.codec_encode!(mem::MutableMemoryView{UInt8}, x::Bool, ::CBool)
-    isempty(mem) && return nothing
+    isempty(mem) && return EncodeError(InsufficientSpace)
     mem[1] = x
     return 1
 end
@@ -132,6 +135,7 @@ end
 # of `try_decode` or `encode!` must not reach into the codec.
 struct Probe <: Encoding end
 BitScribbling.codec_max_encoded_size(::Type{Bool}, ::Probe) = 1
+BitScribbling.codec_encoded_size(::Bool, ::Probe) = 1
 @inline function BitScribbling.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{Bool}, ::Probe)
     isempty(mem) && return DecodeError(EndOfInput)
     checked = false
@@ -139,7 +143,7 @@ BitScribbling.codec_max_encoded_size(::Type{Bool}, ::Probe) = 1
     return (checked, 1)
 end
 @inline function BitScribbling.codec_encode!(mem::MutableMemoryView{UInt8}, ::Bool, ::Probe)
-    isempty(mem) && return nothing
+    isempty(mem) && return EncodeError(InsufficientSpace)
     checked = false
     @boundscheck checked = true
     @inbounds mem[1] = checked
@@ -159,6 +163,44 @@ BitScribbling.codec_encode!(::MutableMemoryView{UInt8}, ::Int16, ::Liar) = -1
 # so it's not caught
 BitScribbling.codec_try_decode(::ImmutableMemoryView{UInt8}, ::Type{UInt8}, ::Liar) = (0x00, 3)
 BitScribbling.codec_encode!(::MutableMemoryView{UInt8}, ::UInt8, ::Liar) = 3
+
+# An 8-bit character set, which can't encode most `Char`s
+struct Latin1 <: Encoding end
+is_latin1(c::Char) = isvalid(c) && codepoint(c) ≤ 0xff
+BitScribbling.codec_max_encoded_size(::Type{Char}, ::Latin1) = 1
+BitScribbling.codec_encoded_size(c::Char, ::Latin1) = is_latin1(c) ? 1 : EncodeError(InvalidValue)
+function BitScribbling.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{Char}, ::Latin1)
+    isempty(mem) && return DecodeError(EndOfInput)
+    return (Char(mem[1]), 1)
+end
+function BitScribbling.codec_encode!(mem::MutableMemoryView{UInt8}, c::Char, ::Latin1)
+    is_latin1(c) || return EncodeError(InvalidValue)
+    isempty(mem) && return EncodeError(InsufficientSpace)
+    mem[1] = codepoint(c) % UInt8
+    return 1
+end
+# Pairs of characters, encoded one by one, so an invalid second character is only found
+# after the first is written
+BitScribbling.codec_max_encoded_size(::Type{Tuple{Char, Char}}, ::Latin1) = 2
+function BitScribbling.codec_encoded_size(x::Tuple{Char, Char}, e::Latin1)
+    a = @try_return try_encoded_size(x[1], e)
+    b = @try_return try_encoded_size(x[2], e)
+    return a + b
+end
+function BitScribbling.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{Tuple{Char, Char}}, e::Latin1)
+    (a, i) = @try_return try_decode_next(mem, 1, Char, e)
+    second = try_decode_next(mem, i, Char, e)
+    second isa DecodeError && return DecodeError(Truncated)
+    (b, next) = second
+    return ((a, b), next - 1)
+end
+function BitScribbling.codec_encode!(mem::MutableMemoryView{UInt8}, x::Tuple{Char, Char}, e::Latin1)
+    # Nothing may be written when there is too little space, so check it first
+    length(mem) < 2 && return EncodeError(InsufficientSpace)
+    a = @try_return try_encode!(mem, x[1], e)
+    b = @try_return try_encode!(mem, 1 + a, x[2], e)
+    return a + b
+end
 
 # Structs that opt in
 struct Header
@@ -288,7 +330,7 @@ end
 const CODEC_CASES = let
     types = (BITS_TYPES..., Bool, Fruit, Small, Signs, U24, S24, U144, S144, Header, Nested, Flagged, Outer, Empty)
     cases = Any[(T, e) for T in types for e in (LittleEndian(), BigEndian())]
-    push!(cases, (Char, UTF8()), (Bool, CBool()))
+    push!(cases, (Char, UTF8()), (Bool, CBool()), (Char, Latin1()), (Tuple{Char, Char}, Latin1()))
     if HAS_NARROW
         for T in (U22, U5, U30, S30, S12, U29), e in (LittleEndian(), BigEndian())
             push!(cases, (T, e))
@@ -363,6 +405,7 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
             for (e, f) in ((LittleEndian(), bytes_le), (BigEndian(), bytes_be))
                 bytes = f(x)
                 @test max_encoded_size(T, e) == sizeof(T)
+                @test try_encoded_size(x, e) === encoded_size(x, e) === sizeof(T)
                 buf = zeros(UInt8, sizeof(T) + 3)
                 @test encode!(MemoryView(buf), x, e) == sizeof(T)
                 @test buf[1:sizeof(T)] == bytes
@@ -374,7 +417,7 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
                 @test buf[2:(sizeof(T) + 1)] == bytes
                 @test isequal(try_decode_n(MemoryView(buf)[2:end], T, e), (x, sizeof(T)))
                 # Too short
-                @test try_encode!(MemoryView(zeros(UInt8, sizeof(T) - 1)), x, e) === nothing
+                @test try_encode!(MemoryView(zeros(UInt8, sizeof(T) - 1)), x, e) === EncodeError(InsufficientSpace)
                 @test_throws LightBoundsError encode!(MemoryView(zeros(UInt8, sizeof(T) - 1)), x, e)
                 @test is_err(try_decode(MemoryView(UInt8[]), T, e), EndOfInput)
                 if sizeof(T) > 1
@@ -480,7 +523,7 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         @test low_bits(decode(MemoryView(buf), 2, T, BigEndian())) == value
         # Too short
         @test is_err(try_decode(MemoryView(le[1:(n - 1)]), T, LittleEndian()), n == 1 ? EndOfInput : Truncated)
-        @test try_encode!(MemoryView(zeros(UInt8, n - 1)), x, LittleEndian()) === nothing
+        @test try_encode!(MemoryView(zeros(UInt8, n - 1)), x, LittleEndian()) === EncodeError(InsufficientSpace)
         # Bulk, and loading byte by byte
         data = vcat(be, be, be[1:(n - 1)])
         dst = MemoryView(Vector{T}(undef, 3))
@@ -618,11 +661,12 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
 
         # Encoding
         for c in ['\0', 'a', 'é', '€', '😀', '\xe2', '\xe2\x82', '\xc0\x80', '\ud800', '\xf7\xbf\xbf\xbf']
+            @test try_encoded_size(c, UTF8()) === encoded_size(c, UTF8()) === ncodeunits(c)
             for len in 0:6
                 buf = fill(0xaa, len)
                 n = try_encode!(MemoryView(buf), c, UTF8())
                 if len < ncodeunits(c)
-                    @test n === nothing
+                    @test n === EncodeError(InsufficientSpace)
                     err = try
                         encode!(MemoryView(buf), c, UTF8())
                     catch e
@@ -791,6 +835,16 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         end
         @test decode_pair(MemoryView([0x01, 0x02])) === 0x03
         @test is_err(decode_pair(MemoryView([0x01])), EndOfInput)
+
+        function encode_pair!(mem, a, b)
+            n = @try_return try_encode!(mem, a, BigEndian())
+            m = @try_return try_encode!(mem, 1 + n, b, BigEndian())
+            return n + m
+        end
+        v = zeros(UInt8, 3)
+        @test encode_pair!(MemoryView(v), 0x01, 0x0203) === 3
+        @test v == [0x01, 0x02, 0x03]
+        @test encode_pair!(MemoryView(zeros(UInt8, 2)), 0x01, 0x0203) === EncodeError(InsufficientSpace)
     end
 
     @testset "decode_into! / encode_into!" begin
@@ -1012,6 +1066,9 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
                     @test try_encode!(MemoryView(a), i, x, e) == try_encode!(MemoryView(b)[i:end], x, e)
                     @test a == b
                     @test all(==(0xaa), a[1:(i - 1)])
+                    # With `max_encoded_size` bytes, encoding succeeds, and writes
+                    # `encoded_size` bytes
+                    @test try_encode!(MemoryView(zeros(UInt8, m)), x, e) === try_encoded_size(x, e)
                 end
             end
         end
@@ -1024,9 +1081,9 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         @test try_decode_next(mem, 6, UInt8, BigEndian()) === DecodeError(EndOfInput)
         @test try_decode(mem, 3, UInt32, BigEndian()) === DecodeError(Truncated)
         @test try_decode(mem, 6, Char, UTF8()) === DecodeError(EndOfInput)
-        @test try_encode!(mem, 6, 0x01, BigEndian()) === nothing
-        @test try_encode!(mem, 3, 0x01020304, BigEndian()) === nothing
-        @test try_encode!(mem, 6, 'a', UTF8()) === nothing
+        @test try_encode!(mem, 6, 0x01, BigEndian()) === EncodeError(InsufficientSpace)
+        @test try_encode!(mem, 3, 0x01020304, BigEndian()) === EncodeError(InsufficientSpace)
+        @test try_encode!(mem, 6, 'a', UTF8()) === EncodeError(InsufficientSpace)
         @test bytes == [0x01, 0x02, 0x03, 0x04, 0x05]
         # Any integer type of index
         @test decode(mem, UInt8(2), UInt16, LittleEndian()) === 0x0302
@@ -1078,12 +1135,14 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         @test occursin("collection[7]", error_message(() -> try_encode!(MemoryView(v), 7, 'a', UTF8())))
         @test v == zeros(UInt8, 5)
         # Only the bytes of the encoding are written, and nothing when it doesn't fit
-        for (x, e) in (('a', UTF8()), ('é', UTF8()), ('€', UTF8()), ('😀', UTF8()),
-                (0x0102, BigEndian()), (true, CBool()), (Header(1, 2, 3, 4), LittleEndian()))
+        for (x, e) in (
+                ('a', UTF8()), ('é', UTF8()), ('€', UTF8()), ('😀', UTF8()),
+                (0x0102, BigEndian()), (true, CBool()), (Header(1, 2, 3, 4), LittleEndian()),
+            )
             for len in 0:12, i in 1:(len + 1)
                 buf = fill(0xaa, len)
                 n = try_encode!(MemoryView(buf), i, x, e)
-                written = n === nothing ? 0 : n
+                written = n isa EncodeError ? 0 : n
                 @test all(==(0xaa), buf[1:(i - 1)])
                 @test all(==(0xaa), buf[(i + written):end])
             end
@@ -1104,6 +1163,81 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
             @test encode!(MemoryView(a), x, e) === try_encode!(MemoryView(b), x, e)
             @test a == b
         end
+    end
+
+    @testset "Values that can't be encoded" begin
+        encode_inbounds!(mem, i, x, e) = @inbounds encode!(mem, i, x, e)
+        @test max_encoded_size(Char, Latin1()) == 1
+        for c in ('a', 'é', '\u00ff')
+            @test try_encoded_size(c, Latin1()) === encoded_size(c, Latin1()) === 1
+        end
+        for c in ('λ', '€', '\u0100', '\xff', '\ud800')
+            @test try_encoded_size(c, Latin1()) === EncodeError(InvalidValue)
+            @test_throws EncodeError(InvalidValue) encoded_size(c, Latin1())
+            for len in 0:2
+                buf = fill(0xaa, len)
+                @test try_encode!(MemoryView(buf), c, Latin1()) === EncodeError(InvalidValue)
+                # Also when `mem` is too short, as this codec checks the value first
+                @test_throws EncodeError(InvalidValue) encode!(MemoryView(buf), c, Latin1())
+                if len ≥ 1
+                    # The value is checked also in an `@inbounds` context
+                    @test_throws EncodeError(InvalidValue) encode_inbounds!(MemoryView(buf), 1, c, Latin1())
+                end
+                # This codec checks the value before writing
+                @test buf == fill(0xaa, len)
+            end
+            io = VecWriter()
+            @test try_store(io, c, Latin1()) === EncodeError(InvalidValue)
+            @test_throws EncodeError(InvalidValue) store(io, c, Latin1())
+            @test isempty(io.vec)
+        end
+        # Too little space for a valid value
+        @test try_encode!(MemoryView(UInt8[]), 'a', Latin1()) === EncodeError(InsufficientSpace)
+        @test_throws LightBoundsError encode!(MemoryView(UInt8[]), 'a', Latin1())
+        io = VecWriter()
+        @test try_store(io, 'é', Latin1()) === 1
+        @test store(io, 'a', Latin1()) === 1
+        @test io.vec == [0xe9, 0x61]
+
+        # Bulk functions stop at the value
+        src = ['a', 'b', 'λ', 'c']
+        buf = fill(0xaa, 6)
+        @test encode_into!(MemoryView(buf), MemoryView(src), Latin1()) == (2, 2)
+        @test buf[1:2] == [0x61, 0x62]
+        @test try_encode!(MemoryView(buf), 3, src[3], Latin1()) === EncodeError(InvalidValue)
+        for cap in (1, 2, 3, 100)
+            sink = UInt8[]
+            io = BoundedWriter(sink, cap)
+            @test_throws EncodeError(InvalidValue) store_all(io, MemoryView(src), Latin1())
+            flush(io)
+            @test sink == [0x61, 0x62]
+        end
+        @test_throws EncodeError(InvalidValue) store_all(VecWriter(), MemoryView(['λ']), Latin1())
+
+        # A codec may write before it finds out that the value is invalid, but not beyond
+        # `max_encoded_size` bytes
+        T = Tuple{Char, Char}
+        @test max_encoded_size(T, Latin1()) == 2
+        @test try_encoded_size(('a', 'b'), Latin1()) === 2
+        @test try_encoded_size(('a', 'λ'), Latin1()) === EncodeError(InvalidValue)
+        @test try_encoded_size(('λ', 'a'), Latin1()) === EncodeError(InvalidValue)
+        buf = fill(0xaa, 5)
+        @test try_encode!(MemoryView(buf), 2, ('a', 'λ'), Latin1()) === EncodeError(InvalidValue)
+        @test buf == [0xaa, 0x61, 0xaa, 0xaa, 0xaa]
+        @test_throws EncodeError(InvalidValue) encode!(MemoryView(buf), 2, ('b', 'λ'), Latin1())
+        # ... but not when there is too little space
+        buf = fill(0xaa, 3)
+        @test try_encode!(MemoryView(buf), 3, ('a', 'b'), Latin1()) === EncodeError(InsufficientSpace)
+        @test_throws LightBoundsError encode!(MemoryView(buf), 3, ('a', 'b'), Latin1())
+        @test buf == fill(0xaa, 3)
+        @test encode!(MemoryView(buf), 2, ('a', 'b'), Latin1()) === 2
+        @test decode(MemoryView(buf), 2, T, Latin1()) === ('a', 'b')
+        # Bytes written for an invalid value are not stored
+        io = VecWriter()
+        @test try_store(io, ('a', 'λ'), Latin1()) === EncodeError(InvalidValue)
+        @test isempty(io.vec)
+        @test store(io, ('x', 'y'), Latin1()) == 2
+        @test io.vec == [0x78, 0x79]
     end
 
     @testset "Structs" begin
@@ -1207,10 +1341,10 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         @test fieldoffset(WithU256, 2) == 16 && sizeof(WithU256) == 48 || Base.datatype_alignment(U256) == 32
         # Accepted structs round-trip
         for x in (
-                Ordered(0x0102030405060708, 0x090a0b0c, 0x0d0e, 0x0f, 0x10),
-                ExplicitPadding(0x01020304, 0x00000000, 0x05060708090a0b0c),
-                WithU256Aligned(reinterpret(U256, ntuple(UInt8, 32)), 0x01, 0x02),
-            ), e in (LittleEndian(), BigEndian())
+                    Ordered(0x0102030405060708, 0x090a0b0c, 0x0d0e, 0x0f, 0x10),
+                    ExplicitPadding(0x01020304, 0x00000000, 0x05060708090a0b0c),
+                    WithU256Aligned(reinterpret(U256, ntuple(UInt8, 32)), 0x01, 0x02),
+                ), e in (LittleEndian(), BigEndian())
             buf = zeros(UInt8, sizeof(x))
             @test encode!(buf, x, e) == sizeof(x)
             @test decode(buf, typeof(x), e) === x
@@ -1276,12 +1410,12 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
             @test next_inbounds(short, 2, UInt32, BigEndian()) === DecodeError(Truncated)
             @test try_decode_inbounds(short, 3, UInt32, BigEndian()) === DecodeError(EndOfInput)
             @test_throws LightBoundsError try_decode_inbounds(short, 0, UInt32, BigEndian())
-            @test try_encode_inbounds!(backing[1:2], 2, 0xaabbccdd, BigEndian()) === nothing
+            @test try_encode_inbounds!(backing[1:2], 2, 0xaabbccdd, BigEndian()) === EncodeError(InsufficientSpace)
             @test_throws LightBoundsError try_encode_inbounds!(backing[1:2], 4, 0xaabbccdd, BigEndian())
             @test decode_inbounds(short, 3, UInt16, BigEndian()) === 0x0506
             @test start_inbounds(short, UInt32, LittleEndian()) === 0x06050403
             @test little_inbounds(short, 2) === (0x0504, 4)
-            @test try_encode!(backing[1:2], 2, 0xaabbccdd, BigEndian()) === nothing
+            @test try_encode!(backing[1:2], 2, 0xaabbccdd, BigEndian()) === EncodeError(InsufficientSpace)
             @test_throws LightBoundsError encode!(backing[1:2], 2, 0xaabbccdd, BigEndian())
             @test encode_inbounds!(backing[1:2], 2, 0xa1b1c1d1, BigEndian()) === 4
             @test collect(backing) == [0x01, 0xa1, 0xb1, 0xc1, 0xd1, 0x06, 0x07, 0x08]
@@ -1340,7 +1474,7 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         v = zeros(UInt8, 5)
         @test try_encode!(v, 0x0102, BigEndian()) === 2
         @test try_encode!(v, 4, 0x0304, BigEndian()) === 2
-        @test try_encode!(v, 5, 0x0304, BigEndian()) === nothing
+        @test try_encode!(v, 5, 0x0304, BigEndian()) === EncodeError(InsufficientSpace)
         @test v == [0x01, 0x02, 0x00, 0x03, 0x04]
         @test encode!(view(v, 2:5), 'é', UTF8()) === 2
         @test encode!(v, 5, 0x09, BigEndian()) === 1
@@ -1420,12 +1554,14 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
             @test a == b
             @test M.try_encode!(MemoryView(a), 0x0506) == try_encode!(MemoryView(b), 0x0506, E)
             @test a == b
-            @test M.try_encode!(MemoryView(a), 4, 0x0708) === try_encode!(MemoryView(b), 4, 0x0708, E) === nothing
+            @test M.try_encode!(MemoryView(a), 4, 0x0708) === try_encode!(MemoryView(b), 4, 0x0708, E) === EncodeError(InsufficientSpace)
             @test M.load(CursorReader(bytes), UInt32) === load(CursorReader(bytes), UInt32, E)
             @test M.try_load(CursorReader(bytes), UInt64) === DecodeError(Truncated)
             w1 = VecWriter()
             w2 = VecWriter()
             @test M.store(w1, 0x0102) == store(w2, 0x0102, E)
+            @test M.try_store(w1, 0x0304) === try_store(w2, 0x0304, E) === 2
+            @test M.try_encoded_size(0x0102) === M.encoded_size(0x0102) === 2
             @test M.store_all(w1, MemoryView(UInt16[1, 2])) == store_all(w2, MemoryView(UInt16[1, 2]), E)
             @test w1.vec == w2.vec
             d1 = zeros(UInt16, 3)
@@ -1448,6 +1584,16 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         for kind in (EndOfInput, Truncated, InvalidData)
             str = sprint(showerror, DecodeError(kind))
             @test startswith(str, "DecodeError: ")
+        end
+    end
+
+    @testset "EncodeError" begin
+        @test isbitstype(EncodeError)
+        @test sizeof(EncodeError) == 1
+        @test EncodeError <: Exception
+        for kind in (InsufficientSpace, InvalidValue)
+            str = sprint(showerror, EncodeError(kind))
+            @test startswith(str, "EncodeError: ")
         end
     end
 
@@ -1501,6 +1647,18 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         mem = ImmutableMemoryView(data)
         bulk_allocs(dst, mem)
         @test bulk_allocs(dst, mem) == 0
+        # Returning an `EncodeError` doesn't allocate
+        function count_invalid(io, chars)
+            k = 0
+            for c in chars
+                try_store(io, c, Latin1()) isa EncodeError && (k += 1)
+            end
+            return k
+        end
+        chars = MemoryView(rand(['a', 'λ'], 100))
+        io = VecWriter(sizehint!(UInt8[], 200))
+        count_invalid(io, chars)
+        @test (@allocated count_invalid(io, chars)) == 0
     end
 
     @testset "Doctests" begin

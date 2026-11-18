@@ -2,6 +2,8 @@
 # encoding argument.
 const convenience_functions = (
     (:max_encoded_size, (:(T::Type),)),
+    (:try_encoded_size, (:x,)),
+    (:encoded_size, (:x,)),
     (:try_decode, (:mem, :(T::Type))),
     (:try_decode, (:mem, :(i::Integer), :(T::Type))),
     (:decode, (:mem, :(T::Type))),
@@ -14,6 +16,7 @@ const convenience_functions = (
     (:encode!, (:mem, :(i::Integer), :x)),
     (:try_load, (:(io::AbstractBufReader), :(T::Type))),
     (:load, (:(io::AbstractBufReader), :(T::Type))),
+    (:try_store, (:(io::AbstractBufWriter), :x)),
     (:store, (:(io::AbstractBufWriter), :x)),
     (:decode_into!, (:dst, :src)),
     (:encode_into!, (:dst, :src)),
@@ -49,9 +52,9 @@ for (mod, E, desc) in (
         @doc $doc module $mod
         using ..BitScribbling: BitScribbling, $E, MemoryView, MutableMemoryView,
             AbstractBufReader, AbstractBufWriter,
-            DecodeError, DecodeErrorKinds, @try_return
+            DecodeError, DecodeErrorKinds, EncodeError, EncodeErrorKinds, @try_return
 
-        export $(names...), DecodeError, DecodeErrorKinds, @try_return
+        export $(names...), DecodeError, DecodeErrorKinds, EncodeError, EncodeErrorKinds, @try_return
         end
     end
     for (f, args) in convenience_functions

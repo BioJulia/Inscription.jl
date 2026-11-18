@@ -5,8 +5,9 @@
 [![Documentation](https://img.shields.io/badge/docs-dev-blue.svg)](https://biojulia.github.io/BitScribbling.jl/dev)
 [![](https://codecov.io/gh/BioJulia/BitScribbling.jl/branch/master/graph/badge.svg)](https://codecov.io/gh/BioJulia/BitScribbling.jl)
 
-BitScribbling encodes and decodes primitive values to and from bytes, either in memory
-(as `MemoryView`s) or by loading and storing them from and to the buffered IO types of
+BitScribbling encodes and decodes values of bits types, such as integers, floats, `Char`
+and isbits structs, to and from bytes, either in memory (as `MemoryView`s) or by loading
+and storing them from and to the buffered IO types of
 [BufferIO.jl](https://github.com/BioJulia/BufferIO.jl).
 
 ```julia

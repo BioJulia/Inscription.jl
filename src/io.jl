@@ -86,15 +86,57 @@ function load(io::AbstractBufReader, ::Type{T}, enc::Encoding)::T where {T}
 end
 
 """
-    store(io::AbstractBufWriter, x, enc::Encoding)::Int
+    try_store(io::AbstractBufWriter, x, enc::Encoding)::Union{Int, EncodeError}
 
 Store `x` into `io` with the encoding `enc`, and return the number of bytes written.
+If `x` can't be encoded with `enc`, return an [`EncodeError`](@ref) of kind
+`InvalidValue`, and consume nothing.
 
 Throw an `IOError` of kind `BufferTooShort` if `io` can't provide a buffer of
 [`max_encoded_size(typeof(x), enc)`](@ref max_encoded_size) bytes, either because it is
 full, or because its buffer can't grow large enough. Writers that can always grow, such
-as those returned by `BufferIO.expandable`, never throw this.
-If `store` throws, nothing has been consumed.
+as those returned by `BufferIO.expandable`, never throw this. Like the buffer capacity
+of a reader for [`try_load`](@ref), this is a property of how `io` was constructed, not
+of `x`, so it is thrown rather than returned.
+If `try_store` throws, nothing has been consumed.
+
+When `x` can't be encoded, bytes of the buffer of `io` after the consumed bytes may have
+been written, as by [`try_encode!`](@ref). Since they are not consumed, they are not
+part of the output.
+
+See also: [`store`](@ref), [`try_encode!`](@ref)
+
+# Examples
+```jldoctest
+julia> io = VecWriter();
+
+julia> try_store(io, 'é', UTF8())
+2
+
+julia> io.vec
+2-element Vector{UInt8}:
+ 0xc3
+ 0xa9
+```
+"""
+@inline function try_store(io::AbstractBufWriter, x::T, enc::Encoding)::Union{Int, EncodeError} where {T}
+    buffer = get_buffer(io)::MutableMemoryView{UInt8}
+    if length(buffer) < max_encoded_size(T, enc)
+        buffer = @noinline write_buffer(io, max_encoded_size(T, enc))
+    end
+    # The buffer holds at least `max_encoded_size` bytes, so the only error is that `x`
+    # can't be encoded, also by the contract of `codec_encode!`.
+    # Calls `_try_encode!` directly, so that `@inbounds` reaches its checks.
+    n = @inbounds _try_encode!(buffer, 1, x, enc)
+    n isa EncodeError && return n
+    @inbounds consume(io, n)
+    return n
+end
+
+"""
+    store(io::AbstractBufWriter, x, enc::Encoding)::Int
+
+Like [`try_store`](@ref), but throw the [`EncodeError`](@ref) instead of returning it.
 
 See also: [`encode!`](@ref), [`store_all`](@ref)
 
@@ -113,21 +155,27 @@ julia> io.vec
  0xa9
 ```
 """
-@inline function store(io::AbstractBufWriter, x::T, enc::Encoding)::Int where {T}
-    buffer = get_buffer(io)::MutableMemoryView{UInt8}
-    if length(buffer) < max_encoded_size(T, enc)
-        buffer = @noinline write_buffer(io, max_encoded_size(T, enc))
-    end
-    # The buffer holds at least `max_encoded_size` bytes, so encoding succeeds, also by the
-    # contract of `codec_encode!`.
-    n = @inbounds encode!(buffer, x, enc)
-    @inbounds consume(io, n)
-    return n
+@inline function store(io::AbstractBufWriter, x, enc::Encoding)::Int
+    result = try_store(io, x, enc)
+    result isa EncodeError && throw_encode_error(result)
+    return result
 end
 
 # Get a writer's buffer of at least n bytes, or throw `BufferTooShort`.
+# Callers encode into the buffer with `@inbounds`, trusting that it holds n bytes. Since
+# writers may implement `get_nonempty_buffer` themselves, check that they do, so a writer
+# that breaks its contract can't make them write out of bounds. This is the slow path, so
+# the check costs nothing on the fast path, where callers check the length themselves.
 function write_buffer(io::AbstractBufWriter, n::Int)::MutableMemoryView{UInt8}
     buffer = get_nonempty_buffer(io, n)
     buffer === nothing && throw(IOError(IOErrorKinds.BufferTooShort))
+    length(buffer) < n && throw_short_buffer_error(io, n, length(buffer))
     return buffer
+end
+
+@noinline function throw_short_buffer_error(io::AbstractBufWriter, n::Int, buffer_length::Int)
+    return error(
+        "`get_nonempty_buffer(io, $n)` for `$(typeof(io))` broke its contract: it returned " *
+            "a buffer of $buffer_length bytes, fewer than the $n requested"
+    )
 end

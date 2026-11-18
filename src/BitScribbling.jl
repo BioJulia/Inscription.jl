@@ -1,7 +1,8 @@
 """
     module BitScribbling
 
-Load and store primitive values to and from byte arrays and BufferIO's IO types.
+Encode and decode values of bits types, i.e. types for which `isbitstype` is true, to
+and from byte arrays and BufferIO's IO types.
 """
 module BitScribbling
 
@@ -24,8 +25,12 @@ export Encoding,
     UTF8,
     DecodeError,
     DecodeErrorKinds,
+    EncodeError,
+    EncodeErrorKinds,
     @try_return,
     max_encoded_size,
+    try_encoded_size,
+    encoded_size,
     try_decode,
     decode,
     try_decode_next,
@@ -34,6 +39,7 @@ export Encoding,
     encode!,
     try_load,
     load,
+    try_store,
     store,
     decode_into!,
     encode_into!,
@@ -52,6 +58,7 @@ public Little,
     is_valid_bits,
     as_unsigned,
     codec_max_encoded_size,
+    codec_encoded_size,
     codec_try_decode,
     codec_encode!
 

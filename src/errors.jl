@@ -100,10 +100,97 @@ function Base.showerror(io::IO, err::DecodeError)
 end
 
 """
+    module EncodeErrorKinds
+
+Used as a namespace for [`EncodeErrorKind`](@ref EncodeErrorKinds.EncodeErrorKind).
+"""
+module EncodeErrorKinds
+    """
+        EncodeErrorKind
+
+    Enum indicating why encoding or storing a value failed. The current list is
+    non-exhaustive, and more may be added in future releases.
+    The integral values of these enums are subject to change in minor versions.
+
+    Current kinds:
+    * [`EncodeErrorKinds.InsufficientSpace`](@ref)
+    * [`EncodeErrorKinds.InvalidValue`](@ref)
+    """
+    @enum EncodeErrorKind::UInt8 begin
+        InsufficientSpace
+        InvalidValue
+    end
+
+    """
+        InsufficientSpace
+
+    The memory to encode into is too short for the encoding of the value.
+    Nothing has been written.
+    """
+    InsufficientSpace
+
+    """
+        InvalidValue
+
+    The value can't be encoded with the encoding, for example a `Char` that is not in
+    an 8-bit character set. Bytes up to the value's
+    [`max_encoded_size`](@ref BitScribbling.max_encoded_size) may have been written.
+    """
+    InvalidValue
+
+    public EncodeErrorKind, InsufficientSpace, InvalidValue
+end
+
+using .EncodeErrorKinds: EncodeErrorKind, InsufficientSpace, InvalidValue
+
+"""
+    EncodeError <: Exception
+
+A failure to encode or store a value. It has the public property
+`.kind::EncodeErrorKind`.
+
+Functions prefixed with `try_` return an `EncodeError` instead of throwing it:
+* [`try_encode!`](@ref) returns either kind.
+* [`try_store`](@ref) and [`try_encoded_size`](@ref) only return `InvalidValue`.
+
+The functions without the prefix throw an `InvalidValue` error as it is. [`encode!`](@ref)
+throws a `LightBoundsError` instead of an `InsufficientSpace` error.
+`EncodeError` is a 1-byte isbits type, so returning `Union{Int, EncodeError}` does not
+allocate.
+
+Types that are [`BitsLoadable`](@ref) or [`BitsStorable`](@ref) can always be encoded,
+so with them, an `EncodeError` always has the kind `InsufficientSpace`.
+
+See also: [`EncodeErrorKinds.EncodeErrorKind`](@ref), [`@try_return`](@ref)
+
+# Examples
+```jldoctest
+julia> try_encode!(MemoryView(zeros(UInt8, 3)), 0x01020304, BigEndian())
+EncodeError(BitScribbling.EncodeErrorKinds.InsufficientSpace)
+```
+"""
+struct EncodeError <: Exception
+    kind::EncodeErrorKind
+end
+
+function Base.showerror(io::IO, err::EncodeError)
+    kind = err.kind
+    str = if kind === InsufficientSpace
+        "Insufficient space: the memory is too short for the encoding of the value"
+    elseif kind === InvalidValue
+        "Invalid value: the value can't be encoded with the encoding"
+    else
+        "Unknown encoding error"
+    end
+    print(io, "EncodeError: ", str)
+    return nothing
+end
+
+"""
     @try_return expr
 
-Evaluate `expr`. If the result is a [`DecodeError`](@ref), return it from the enclosing
-function. Otherwise, the macro evaluates to the result.
+Evaluate `expr`. If the result is a [`DecodeError`](@ref) or an [`EncodeError`](@ref),
+return it from the enclosing function. Otherwise, the macro evaluates to the result.
 
 !!! note
     The name of this macro is provisional.
@@ -126,11 +213,12 @@ DecodeError(BitScribbling.DecodeErrorKinds.Truncated)
 macro try_return(expr)
     return quote
         result = $(esc(expr))
-        result isa DecodeError && return result
+        result isa Union{DecodeError, EncodeError} && return result
         result
     end
 end
 
-# Throw `e`. Outlined, because throwing boxes the isbits `DecodeError`, which would
-# otherwise be done at every call site that inlines the caller.
+# Throw `e`. Outlined, because throwing boxes the isbits error, which would otherwise be
+# done at every call site that inlines the caller.
 @noinline throw_decode_error(e::DecodeError) = throw(e)
+@noinline throw_encode_error(e::EncodeError) = throw(e)

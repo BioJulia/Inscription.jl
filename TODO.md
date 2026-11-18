@@ -5,8 +5,7 @@
         codec
         odd sized primitive
         custom struct
-
-Discuss: Isn't this generic serialization at this point?
+        one with variable length encoding
 
 * Read all docstrings and review them
 

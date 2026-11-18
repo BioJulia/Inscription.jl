@@ -1,9 +1,12 @@
 """
     abstract type Encoding end
 
-An encoding says how *one primitive value* maps to bytes. Encodings are singletons,
-passed as the last argument of every function in this package, and resolved at compile
-time.
+An encoding says how *one value* of a bits type, i.e. a type for which `isbitstype` is
+true, maps to bytes. Types that refer to other memory, such as `String` and `Vector`,
+are out of scope.
+
+Encodings are singletons, passed as the last argument of every function in this package,
+and resolved at compile time.
 
 This package defines [`LittleEndian`](@ref), [`BigEndian`](@ref) and [`UTF8`](@ref).
 Other packages may define their own encodings, for example
@@ -28,8 +31,9 @@ There are three ways to provide a codec, depending on `T`:
 The first two only apply to [`LittleEndian`](@ref) and [`BigEndian`](@ref), see
 [`BitsKind`](@ref), which also lists the requirements for structs.
 
-A hand-written codec for `T` and an encoding type `E` consists of three methods:
+A hand-written codec for `T` and an encoding type `E` consists of four methods:
 * [`codec_max_encoded_size(::Type{T}, ::E)`](@ref codec_max_encoded_size)
+* [`codec_encoded_size(x::T, ::E)`](@ref codec_encoded_size)
 * [`codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{T}, ::E)`](@ref codec_try_decode)
 * [`codec_encode!(mem::MutableMemoryView{UInt8}, x::T, ::E)`](@ref codec_encode!)
 

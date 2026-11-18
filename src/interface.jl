@@ -25,6 +25,60 @@ julia> max_encoded_size(Char, UTF8())
 end
 
 """
+    try_encoded_size(x::T, enc::Encoding)::Union{Int, EncodeError}
+
+Return the number of bytes of the encoding of `x` with `enc`, or an
+[`EncodeError`](@ref) of kind `InvalidValue` if `x` can't be encoded with `enc`.
+
+The size is exactly the number of bytes that [`try_encode!`](@ref) writes for `x`, and is
+at most [`max_encoded_size(T, enc)`](@ref max_encoded_size). Since `x` is not encoded,
+this is the way to check whether it can be, or to find the size of a buffer to encode
+it into.
+
+Types that are [`BitsLoadable`](@ref) or [`BitsStorable`](@ref) can always be encoded,
+and their size is that of the type.
+
+This function is not an extension point: never add methods to it. Implement a codec
+instead, see [`Encoding`](@ref).
+
+See also: [`encoded_size`](@ref)
+
+# Examples
+```jldoctest
+julia> try_encoded_size(0x0102, BigEndian())
+2
+
+julia> try_encoded_size('€', UTF8())
+3
+```
+"""
+@inline function try_encoded_size(x::T, enc::Encoding)::Union{Int, EncodeError} where {T}
+    return if codec_kind(T, enc) isa ManualCodec
+        codec_encoded_size(x, enc)
+    else
+        bits_encoded_size(T)
+    end
+end
+
+"""
+    encoded_size(x::T, enc::Encoding)::Int
+
+Like [`try_encoded_size`](@ref), but throw the [`EncodeError`](@ref) instead of
+returning it.
+
+# Examples
+```jldoctest
+julia> encoded_size('a', UTF8())
+1
+```
+"""
+@inline function encoded_size(x, enc::Encoding)::Int
+    result = try_encoded_size(x, enc)
+    result isa EncodeError && throw_encode_error(result)
+    return result
+end
+
+"""
     try_decode(mem, [i::Integer,] ::Type{T}, enc::Encoding)::Union{T, DecodeError}
 
 Decode a `T` from `mem`, starting at index `i` (default: 1), treating the bytes from `i`
@@ -230,18 +284,29 @@ end
 end
 
 """
-    try_encode!(mem, [i::Integer,] x::T, enc::Encoding)::Union{Nothing, Int}
+    try_encode!(mem, [i::Integer,] x::T, enc::Encoding)::Union{Int, EncodeError}
 
 Encode `x` into `mem`, starting at index `i` (default: 1). Return the number of bytes
-written, or `nothing` if the bytes from `i` to the end of `mem` are too few.
+written, or an [`EncodeError`](@ref).
 
 `i` must be in `1:length(mem)+1`, or a `LightBoundsError` is thrown.
 
 `mem` is a `MutableMemoryView{UInt8}`, or other mutable memory that `MemoryView` can
 view as one, such as a `Vector{UInt8}`, see [`try_decode`](@ref).
 
-Only the bytes of the encoding are written. When `nothing` is returned, `mem` is not
-written at all.
+The error kind is:
+* `InsufficientSpace` if the bytes from `i` to the end of `mem` are too few for the
+  encoding of `x`. Then, nothing is written.
+* `InvalidValue` if `x` can't be encoded with `enc`. Then, the bytes from `i` up to
+  [`max_encoded_size(T, enc)`](@ref max_encoded_size) bytes later, but not beyond the
+  end of `mem`, may have been written, and their contents are unspecified.
+
+If both apply, either kind may be returned. Use [`try_encoded_size`](@ref) to check
+whether `x` can be encoded without writing anything.
+
+On success, only the bytes of the encoding are written. If at least
+`max_encoded_size(T, enc)` bytes remain from `i`, encoding fails only if `x` can't be
+encoded.
 
 This function ignores `@inbounds`, like [`try_decode`](@ref). To skip the length checks,
 use [`encode!`](@ref) in an `@inbounds` context.
@@ -262,11 +327,12 @@ julia> try_encode!(MemoryView(v), 2, 0x0304, BigEndian()), v
 (2, UInt8[0x01, 0x03, 0x04])
 
 julia> try_encode!(MemoryView(v), 0x01020304, BigEndian()) # too short
+EncodeError(BitScribbling.EncodeErrorKinds.InsufficientSpace)
 ```
 """
 @inline function try_encode!(
         mem::MutableMemoryView{UInt8}, i::Integer, x, enc::Encoding
-    )::Union{Nothing, Int}
+    )::Union{Int, EncodeError}
     return _try_encode!(mem, i, x, enc)
 end
 
@@ -279,7 +345,7 @@ end
 # `try_encode!` doesn't propagate it.
 @inline function _try_encode!(
         mem::MutableMemoryView{UInt8}, i::Integer, x::T, enc::Encoding
-    )::Union{Nothing, Int} where {T}
+    )::Union{Int, EncodeError} where {T}
     i = Int(i)::Int
     if codec_kind(T, enc) isa ManualCodec
         @boundscheck check_start_index(mem, i)
@@ -288,7 +354,7 @@ end
     n = bits_encoded_size(T)
     @boundscheck if !has_bytes(mem, i, n)
         check_start_index(mem, i)
-        return nothing
+        return EncodeError(InsufficientSpace)
     end
     unsafe_encode_bits!(mem, i - 1, x, enc)
     return n
@@ -297,15 +363,19 @@ end
 """
     encode!(mem, [i::Integer,] x::T, enc::Encoding)::Int
 
-Like [`try_encode!`](@ref), but throw a `LightBoundsError` instead of returning `nothing`
-when the bytes from `i` to the end of `mem` are too few.
-The error reports the indices that the encoding needed, if they are known. Otherwise, it
-reports the indices from `i` to `length(mem) + 1`, since at least one more byte was needed.
+Like [`try_encode!`](@ref), but throw instead of returning an [`EncodeError`](@ref):
+* When the bytes from `i` to the end of `mem` are too few, throw a `LightBoundsError`.
+  It reports the indices that the encoding needed, if they are known. Otherwise, it
+  reports the indices from `i` to `length(mem) + 1`, since at least one more byte was
+  needed.
+* When `x` can't be encoded, throw the `EncodeError` of kind `InvalidValue`.
+As for `try_encode!`, if both apply, either may be thrown.
 
 In an `@inbounds` context, the caller guarantees that `i ≥ 1`, and that at least
 [`max_encoded_size(T, enc)`](@ref max_encoded_size) bytes remain from `i`. The checks
-that would throw may then be skipped, and the behaviour is undefined if the guarantees
-don't hold. The checks of a hand-written codec are its own, and always run.
+that would throw a `LightBoundsError` may then be skipped, and the behaviour is undefined
+if the guarantees don't hold. Whether `x` can be encoded is always checked.
+The checks of a hand-written codec are its own, and always run.
 
 # Examples
 ```jldoctest
@@ -323,19 +393,23 @@ Base.@propagate_inbounds function encode!(
         mem::MutableMemoryView{UInt8}, i::Integer, x::T, enc::Encoding
     )::Int where {T}
     # Calls `_try_encode!` directly, so that `@inbounds` reaches its checks
-    n = _try_encode!(mem, i, x, enc)
-    n === nothing && throw_encode_error(mem, Int(i)::Int, T, enc)
-    return n
+    result = _try_encode!(mem, i, x, enc)
+    result isa EncodeError && throw_encode_failure(mem, Int(i)::Int, T, enc, result)
+    return result
 end
 
 Base.@propagate_inbounds function encode!(mem::MutableMemoryView{UInt8}, x, enc::Encoding)
     return encode!(mem, 1, x, enc)
 end
 
-# Throw the error of `encode!` for a T at the valid start index `i`, when `mem` is too
-# short. A hand-written codec doesn't say how many bytes it needed, but at least one more
-# byte than `mem` has. Inlined for the same reason as `check_start_index`.
-@inline function throw_encode_error(mem::MemoryView, i::Int, ::Type{T}, enc::Encoding) where {T}
+# Throw the error of `encode!` for `err`, returned when encoding a T at the valid start
+# index `i`. For lack of space, that is a `LightBoundsError`. A hand-written codec doesn't
+# say how many bytes it needed, but at least one more byte than `mem` has.
+# Inlined for the same reason as `check_start_index`.
+@inline function throw_encode_failure(
+        mem::MemoryView, i::Int, ::Type{T}, enc::Encoding, err::EncodeError
+    ) where {T}
+    err.kind === InsufficientSpace || throw_encode_error(err)
     stop = if codec_kind(T, enc) isa ManualCodec
         length(mem) + 1
     else
@@ -375,6 +449,23 @@ calling [`codec_try_decode`](@ref) or [`codec_encode!`](@ref).
 function codec_max_encoded_size end
 
 """
+    codec_encoded_size(x::T, ::E)::Union{Int, EncodeError}
+
+Extension point of a hand-written codec for the value type `T` and the concrete encoding
+type `E`, see [`Encoding`](@ref). Never call it directly; call
+[`try_encoded_size`](@ref) or [`encoded_size`](@ref).
+
+Return the number of bytes of the encoding of `x`, or an [`EncodeError`](@ref) of kind
+`InvalidValue` if `x` can't be encoded. An implementation must follow this contract:
+* It agrees with [`codec_encode!`](@ref): it returns a size exactly when `codec_encode!`
+  can encode `x`, and the size is the byte count that `codec_encode!` returns.
+* It returns no other error kind than `InvalidValue`.
+
+The contract is not checked.
+"""
+function codec_encoded_size end
+
+"""
     codec_try_decode(
         mem::ImmutableMemoryView{UInt8}, ::Type{T}, ::E
     )::Union{Tuple{T, Int}, DecodeError}
@@ -407,21 +498,30 @@ contract in this way would otherwise corrupt memory.
 function codec_try_decode end
 
 """
-    codec_encode!(mem::MutableMemoryView{UInt8}, x::T, ::E)::Union{Nothing, Int}
+    codec_encode!(mem::MutableMemoryView{UInt8}, x::T, ::E)::Union{Int, EncodeError}
 
 Extension point of a hand-written codec for the value type `T` and the concrete encoding
 type `E`, see [`Encoding`](@ref). Never call it directly; call [`try_encode!`](@ref) or
 [`encode!`](@ref).
 
-Encode `x` at the start of `mem`, and return the number of bytes written, or `nothing`
-if `mem` is too short. An implementation must follow this contract:
-* It must succeed if `length(mem) ≥ max_encoded_size(T, enc)`.
-* It must not write to `mem` beyond the returned byte count, and must not write to
-  `mem` at all when it returns `nothing`. The bytes after the encoding may belong to
-  the caller, e.g. when patching a field into an existing buffer, or be written
-  concurrently by another task. So it must not even write back the value it read.
+Encode `x` at the start of `mem`, and return the number of bytes written, or an
+[`EncodeError`](@ref): of kind `InsufficientSpace` if `mem` is too short, or of kind
+`InvalidValue` if `x` can't be encoded. If both apply, either may be returned.
+An implementation must follow this contract:
+* It must succeed if `x` can be encoded and `length(mem) ≥ max_encoded_size(T, enc)`.
+* It must not write to `mem` beyond the returned byte count on success, and must not
+  write to `mem` at all when it returns an `InsufficientSpace` error. The bytes after the
+  encoding may belong to the caller, e.g. when patching a field into an existing buffer,
+  or be written concurrently by another task. So it must not even write back the value
+  it read.
+* When it returns an `InvalidValue` error, it may have written to the first
+  `min(length(mem), max_encoded_size(T, enc))` bytes of `mem`, but not beyond. This
+  allows a codec to find out that `x` is invalid while encoding it, e.g. a codec that
+  encodes the fields of a struct one by one.
 * On success, the returned byte count `n` satisfies
-  `0 ≤ n ≤ min(length(mem), max_encoded_size(T, enc))`.
+  `0 ≤ n ≤ min(length(mem), max_encoded_size(T, enc))`, and equals
+  [`codec_encoded_size(x, enc)`](@ref codec_encoded_size).
+* It returns no other error kinds than these two.
 
 The rules are not checked, with one exception: an `ErrorException` is thrown if the
 returned byte count is not in `0:length(mem)`, also in an `@inbounds` context. This is
@@ -451,9 +551,9 @@ end
 
 @inline function call_codec_encode!(
         mem::MutableMemoryView{UInt8}, x::T, enc::Encoding
-    )::Union{Nothing, Int} where {T}
+    )::Union{Int, EncodeError} where {T}
     n = codec_encode!(mem, x, enc)
-    n === nothing && return nothing
+    n isa EncodeError && return n
     # Check only what keeps a broken codec from causing undefined behaviour, see
     # `call_codec_try_decode`.
     (n % UInt) ≤ (length(mem) % UInt) || throw_count_error(codec_encode!, T, enc, n, length(mem))

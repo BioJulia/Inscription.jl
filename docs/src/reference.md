@@ -18,3 +18,8 @@ Modules = [BitScribbling.Big]
 ```@autodocs
 Modules = [BitScribbling.DecodeErrorKinds]
 ```
+
+## EncodeErrorKinds
+```@autodocs
+Modules = [BitScribbling.EncodeErrorKinds]
+```

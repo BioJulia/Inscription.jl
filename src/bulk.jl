@@ -98,14 +98,20 @@ end
 """
     encode_into!(dst, src, enc::Encoding)::Tuple{Int, Int}
 
-Encode elements of `src` into the start of the bytes `dst`, until `src` is exhausted or
-`dst` has no room for the next element. Return the number of elements encoded, and the
-number of bytes written.
+Encode elements of `src` into the start of the bytes `dst`, until `src` is exhausted,
+`dst` has no room for the next element, or the next element can't be encoded. Return the
+number of elements encoded, and the number of bytes written.
 
 `dst` is mutable memory of bytes, and `src` memory of elements, either as `MemoryView`s
 or as other memory that `MemoryView` can view, such as `Vector`s, see
-[`try_decode`](@ref). They must not overlap. Bytes of `dst` after the returned number of
-bytes are not written.
+[`try_decode`](@ref). They must not overlap.
+
+To learn why encoding stopped before `src` was exhausted, call [`try_encode!`](@ref) at
+the index after the bytes written.
+
+Bytes of `dst` after the returned number of bytes are not written, unless encoding
+stopped at an element that can't be encoded. Then, bytes after them may have been
+written as by `try_encode!` for that element.
 
 With an [`Endianness`](@ref) encoding, types whose [`bits_kind`](@ref) is
 [`BitsLoadable`](@ref) or [`BitsStorable`](@ref) are copied with `memcpy`, or a
@@ -149,7 +155,7 @@ function encode_into!(
     for n_elements in 0:(length(src) - 1)
         x = @inbounds src[n_elements + 1]
         n = call_codec_encode!((@inbounds dst[(n_bytes + 1):end]), x, enc)
-        n === nothing && return (n_elements, n_bytes)
+        n isa EncodeError && return (n_elements, n_bytes)
         n_bytes += n
     end
     return (length(src), n_bytes)
@@ -310,7 +316,8 @@ Store all elements of `src` into `io`, and return the number of bytes written. `
 [`try_decode`](@ref).
 
 Like [`store`](@ref), throw an `IOError` of kind `BufferTooShort` if `io` can't
-provide a buffer of [`max_encoded_size(T, enc)`](@ref max_encoded_size) bytes.
+provide a buffer of [`max_encoded_size(T, enc)`](@ref max_encoded_size) bytes, and
+throw an [`EncodeError`](@ref) if an element can't be encoded.
 Each element is stored all-or-nothing, but elements before the one that could not be
 stored remain stored.
 
@@ -337,9 +344,17 @@ function store_all(io::AbstractBufWriter, src::MemoryView{T}, enc::Encoding)::In
         if length(buffer) < max_encoded_size(T, enc)
             buffer = @noinline write_buffer(io, max_encoded_size(T, enc))
         end
-        # At least one element is encoded, by the contract of `encode!`
+        # The buffer has room for any element, so encoding stops before the first
+        # element only if it can't be encoded, by the contract of `codec_encode!`.
         (n_elements, n_bytes) = encode_into!(buffer, src, enc)
-        @inbounds consume(io, n_bytes)
+        if iszero(n_elements)
+            # `store` throws the error. If it stores the element anyway, e.g. because
+            # the codec is not pure, use the element.
+            n_bytes = store(io, (@inbounds src[1]), enc)
+            n_elements = 1
+        else
+            @inbounds consume(io, n_bytes)
+        end
         n_total += n_bytes
         src = @inbounds src[(n_elements + 1):end]
     end
