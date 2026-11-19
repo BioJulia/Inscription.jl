@@ -33,9 +33,9 @@ The first two only apply to [`LittleEndian`](@ref) and [`BigEndian`](@ref), see
 
 A hand-written codec for `T` and an encoding type `E` consists of four methods:
 * [`codec_max_encoded_size(::Type{T}, ::E)`](@ref codec_max_encoded_size)
-* [`codec_encoded_size(x::T, ::E)`](@ref codec_encoded_size)
+* [`codec_try_encoded_size(x::T, ::E)`](@ref codec_try_encoded_size)
 * [`codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{T}, ::E)`](@ref codec_try_decode)
-* [`codec_encode!(mem::MutableMemoryView{UInt8}, x::T, ::E)`](@ref codec_encode!)
+* [`codec_try_encode!(mem::MutableMemoryView{UInt8}, x::T, ::E)`](@ref codec_try_encode!)
 
 Optionally, it can also implement
 [`codec_bytes_needed(mem::ImmutableMemoryView{UInt8}, ::Type{T}, ::E)`](@ref codec_bytes_needed),

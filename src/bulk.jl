@@ -48,7 +48,7 @@ end
         complete::Bool,
     )::Tuple{Int, Int} where {T}
     kind = codec_kind(T, enc)
-    if !(kind isa ManualCodec)
+    if !(kind isa Opaque)
         # Fixed size: each whole element in src is decided
         element_size = bits_encoded_size(T)
         n_max = min(length(dst), div(length(src), element_size))
@@ -142,7 +142,7 @@ julia> dst
 function encode_into!(
         dst::MutableMemoryView{UInt8}, src::MemoryView{T}, enc::Encoding
     )::Tuple{Int, Int} where {T}
-    if !(codec_kind(T, enc) isa ManualCodec)
+    if !(codec_kind(T, enc) isa Opaque)
         element_size = bits_encoded_size(T)
         n_elements = min(length(src), div(length(dst), element_size))
         if is_dense_bits(T)
@@ -157,7 +157,7 @@ function encode_into!(
     n_bytes = 0
     for n_elements in 0:(length(src) - 1)
         x = @inbounds src[n_elements + 1]
-        n = call_codec_encode!((@inbounds dst[(n_bytes + 1):end]), x, enc)
+        n = call_codec_try_encode!((@inbounds dst[(n_bytes + 1):end]), x, enc)
         n isa EncodeError && return (n_elements, n_bytes)
         n_bytes += n
     end
@@ -350,7 +350,7 @@ function store_all(io::AbstractBufWriter, src::MemoryView{T}, enc::Encoding)::In
             buffer = @noinline write_buffer(io, max_encoded_size(T, enc))
         end
         # The buffer has room for any element, so encoding stops before the first
-        # element only if it can't be encoded, by the contract of `codec_encode!`.
+        # element only if it can't be encoded, by the contract of `codec_try_encode!`.
         (n_elements, n_bytes) = encode_into!(buffer, src, enc)
         if iszero(n_elements)
             # `store` throws the error. If it stores the element anyway, e.g. because

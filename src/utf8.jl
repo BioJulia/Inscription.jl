@@ -1,7 +1,7 @@
 codec_max_encoded_size(::Type{Char}, ::UTF8) = 4
 
-# Every Char can be encoded, see `codec_encode!`
-codec_encoded_size(c::Char, ::UTF8) = ncodeunits(c)
+# Every Char can be encoded, see `codec_try_encode!`
+codec_try_encoded_size(c::Char, ::UTF8) = ncodeunits(c)
 
 # Follows `iterate(::String)` exactly, see the docstring of `try_decode`.
 @inline function codec_try_decode(
@@ -40,12 +40,12 @@ end
 end
 
 # Writes the code units of `c` as they are, without validating it.
-@inline function codec_encode!(mem::MutableMemoryView{UInt8}, c::Char, ::UTF8)::Union{Int, EncodeError}
+@inline function codec_try_encode!(mem::MutableMemoryView{UInt8}, c::Char, ::UTF8)::Union{Int, EncodeError}
     u = reinterpret(UInt32, c)
     n = ncodeunits(c)
     length(mem) < n && return EncodeError(InsufficientSpace)
     # The code units are the leading bytes of u, most significant first. Only they are
-    # written: the bytes after them are not ours, by the contract of `codec_encode!`.
+    # written: the bytes after them are not ours, by the contract of `codec_try_encode!`.
     for i in 1:n
         @inbounds mem[i] = (u >> (32 - 8 * i)) % UInt8
     end

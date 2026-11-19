@@ -57,15 +57,15 @@ public Little,
     BitsKind,
     BitsLoadable,
     BitsStorable,
-    ManualCodec,
+    Opaque,
     bits_kind,
     is_valid_bits,
     as_unsigned,
     codec_max_encoded_size,
-    codec_encoded_size,
+    codec_try_encoded_size,
     codec_try_decode,
     codec_bytes_needed,
-    codec_encode!
+    codec_try_encode!
 
 include("encodings.jl")
 include("errors.jl")

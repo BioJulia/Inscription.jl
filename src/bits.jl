@@ -2,7 +2,7 @@
     abstract type BitsKind end
 
 The kinds of [`bits_kind`](@ref), currently: [`BitsLoadable`](@ref),
-[`BitsStorable`](@ref) and [`ManualCodec`](@ref).
+[`BitsStorable`](@ref) and [`Opaque`](@ref).
 
 These zero-sized trait structs describe the bits of a primitive type or isbits struct
 `T`, independent of any encoding:
@@ -10,7 +10,7 @@ These zero-sized trait structs describe the bits of a primitive type or isbits s
   should be `BitsLoadable()`. Examples: `UInt32`, `Float64`.
 * Else, if a `T` is exactly its bits, but some bit patterns are not valid, `bits_kind(T)`
   should be `BitsStorable()`. Examples: `Bool`, `Enum` types.
-* Else, `bits_kind(T)` should be `ManualCodec()`, which is the default for all types.
+* Else, `bits_kind(T)` should be `Opaque()`, which is the default for all types.
   Examples: `Char`.
 
 Each encoding decides whether it uses `bits_kind`. The byte-order encodings,
@@ -37,7 +37,7 @@ type may also be packed with the bits of other values, e.g. one 18-bit value sta
 the middle of the third byte of the previous one. This package works on whole bytes, so
 it can't decode such data.
 
-To encode such a type with a byte order anyway, leave its `bits_kind` as `ManualCodec`,
+To encode such a type with a byte order anyway, leave its `bits_kind` as `Opaque`,
 and write a codec for `LittleEndian` and `BigEndian`, see [`Encoding`](@ref). The codec
 then decides how the value fills whole bytes, e.g. zero-extended to 3 bytes, and what
 decoding does with bits that are not part of the value.
@@ -50,7 +50,7 @@ exactly its representation in memory.
 
 Such a struct must satisfy these requirements, which are checked when it is first
 encoded or decoded. If they don't hold, an `ArgumentError` is thrown:
-* The [`bits_kind`](@ref) of each field is not `ManualCodec`, and the fields that are
+* The [`bits_kind`](@ref) of each field is not `Opaque`, and the fields that are
   structs satisfy these requirements themselves.
 * If `T` is `BitsLoadable`, all its fields are `BitsLoadable`.
 * The bit width of each primitive field is a power of two, and at least 8, as for
@@ -114,9 +114,9 @@ requirements of structs.
 struct BitsStorable <: BitsKind end
 
 """
-    ManualCodec() <: BitsKind
+    Opaque() <: BitsKind
 
-The default value of `bits_kind(T)` is `ManualCodec()`. It signals that the encoding of a
+The default value of `bits_kind(T)` is `Opaque()`. It signals that the encoding of a
 `T` is not its representation in memory, so encoding and decoding it requires a
 hand-written codec. This is the case for many bits types, e.g. `Char`, as well as for
 types that are not bits types.
@@ -124,10 +124,14 @@ types that are not bits types.
 For such a type `T`, implement for each supported concrete encoding type `E`, see
 [`Encoding`](@ref):
 * [`codec_max_encoded_size(::Type{T}, ::E)`](@ref codec_max_encoded_size)
+* [`codec_try_encoded_size(x::T, ::E)`](@ref codec_try_encoded_size)
 * [`codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{T}, ::E)`](@ref codec_try_decode)
-* [`codec_encode!(mem::MutableMemoryView{UInt8}, x::T, ::E)`](@ref codec_encode!)
+* [`codec_try_encode!(mem::MutableMemoryView{UInt8}, x::T, ::E)`](@ref codec_try_encode!)
+
+Optionally, also implement
+[`codec_bytes_needed(mem::ImmutableMemoryView{UInt8}, ::Type{T}, ::E)`](@ref codec_bytes_needed).
 """
-struct ManualCodec <: BitsKind end
+struct Opaque <: BitsKind end
 
 """
     bits_kind(::Type{T})::BitsKind
@@ -136,7 +140,7 @@ Compute the `BitsKind` instance of `T`. This method should be constant foldable.
 
 See also: [`BitsKind`](@ref)
 """
-bits_kind(::Type)::BitsKind = ManualCodec()
+bits_kind(::Type)::BitsKind = Opaque()
 
 bits_kind(
     ::Union{
@@ -258,14 +262,14 @@ function uint_of_size(n::Int)::Type{<:Unsigned}
     end
 end
 
-# The kind of the codec for T with the encoding `enc`. Hand-written codecs are
-# `ManualCodec`.
+# The kind of the codec for T with the encoding `enc`. `Opaque` means a hand-written
+# codec, which every encoding other than the byte orders requires.
 # Throw an `ArgumentError` if T is declared to be a bits type, but can't be one.
 # The check is constant-folded, so this costs nothing at runtime.
 @inline function codec_kind(::Type{T}, enc::Encoding)::BitsKind where {T}
-    enc isa Endianness || return ManualCodec()
+    enc isa Endianness || return Opaque()
     kind = bits_kind(T)::BitsKind
-    kind isa ManualCodec && return kind
+    kind isa Opaque && return kind
     message = bits_type_error(T, kind)
     message === nothing || throw(ArgumentError(message))
     return kind
@@ -283,7 +287,7 @@ Base.@assume_effects :foldable function bits_type_error(
         n_bits % 8 == 0 && return nothing
         return "`bits_kind($T)` is `$(kind_name(kind))`, but the bit width $n_bits of `$T` is not " *
             "a multiple of 8, so `LittleEndian` and `BigEndian` can't encode it as its bits. " *
-            "To encode it in whole bytes, leave its `bits_kind` as `ManualCodec`, and write a codec " *
+            "To encode it in whole bytes, leave its `bits_kind` as `Opaque`, and write a codec " *
             "for each byte order"
     end
     if !(isstructtype(T) && isbitstype(T))
@@ -298,8 +302,8 @@ Base.@assume_effects :foldable function bits_type_error(
         F = fieldtype(T, i)
         name = fieldname(T, i)
         field_kind = bits_kind(F)::BitsKind
-        if field_kind isa ManualCodec
-            return "The field `$name` of `$T` has the type `$F`, whose `bits_kind` is `ManualCodec`"
+        if field_kind isa Opaque
+            return "The field `$name` of `$T` has the type `$F`, whose `bits_kind` is `Opaque`"
         elseif kind isa BitsLoadable && !(field_kind isa BitsLoadable)
             return "`$T` is `BitsLoadable`, but its field `$name` has the type `$F`, which is `$(kind_name(field_kind))`"
         end

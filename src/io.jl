@@ -232,7 +232,7 @@ julia> io.vec
         buffer = @noinline write_buffer(io, max_encoded_size(T, enc))
     end
     # The buffer holds at least `max_encoded_size` bytes, so the only error is that `x`
-    # can't be encoded, also by the contract of `codec_encode!`.
+    # can't be encoded, also by the contract of `codec_try_encode!`.
     # Calls `_try_encode!` directly, so that `@inbounds` reaches its checks.
     n = @inbounds _try_encode!(buffer, 1, x, enc)
     n isa EncodeError && return n
@@ -262,7 +262,22 @@ julia> io.vec
  0xa9
 ```
 """
-@inline function store(io::AbstractBufWriter, x, enc::Encoding)::Int
+@inline function store(io::AbstractBufWriter, x::T, enc::Encoding)::Int where {T}
+    # Only the fast path, where the buffer holds at least `max_encoded_size` bytes, is
+    # inlined. The slow path, including its error, is handled by an outlined function that
+    # returns the final result, so the caller's code has no error branch after the call.
+    # This is faster, and the code smaller, than implementing `store` with `try_store`.
+    # Doing the same for `try_store`, or the load functions, made them slower.
+    buffer = get_buffer(io)::MutableMemoryView{UInt8}
+    length(buffer) < max_encoded_size(T, enc) && return @noinline store_slow(io, x, enc)
+    # Calls `_try_encode!` directly, so that `@inbounds` reaches its checks, see `try_store`
+    n = @inbounds _try_encode!(buffer, 1, x, enc)
+    n isa EncodeError && throw_encode_error(n)
+    @inbounds consume(io, n)
+    return n
+end
+
+function store_slow(io::AbstractBufWriter, x, enc::Encoding)::Int
     result = try_store(io, x, enc)
     result isa EncodeError && throw_encode_error(result)
     return result

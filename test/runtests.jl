@@ -1,7 +1,7 @@
 using Test
 using BitScribbling
 using BitScribbling: DecodeErrorKinds, EncodeErrorKinds, Little, Big
-using BitScribbling: bits_kind, BitsLoadable, BitsStorable, ManualCodec, is_valid_bits, as_unsigned
+using BitScribbling: bits_kind, BitsLoadable, BitsStorable, Opaque, is_valid_bits, as_unsigned
 using BitScribbling.DecodeErrorKinds: EndOfInput, Truncated, InvalidData, TrailingData
 using BitScribbling.EncodeErrorKinds: InsufficientSpace, InvalidValue
 using BufferIO
@@ -100,13 +100,13 @@ if HAS_NARROW
     for E in (LittleEndian, BigEndian)
         @eval begin
             BitScribbling.codec_max_encoded_size(::Type{U29}, ::$E) = 4
-            BitScribbling.codec_encoded_size(::U29, ::$E) = 4
+            BitScribbling.codec_try_encoded_size(::U29, ::$E) = 4
             function BitScribbling.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{U29}, e::$E)
                 raw = @try_return try_decode(mem, UInt32, e)
                 raw > 0x1fffffff && return DecodeError(InvalidData)
                 return (U29(raw), 4)
             end
-            function BitScribbling.codec_encode!(mem::MutableMemoryView{UInt8}, x::U29, e::$E)
+            function BitScribbling.codec_try_encode!(mem::MutableMemoryView{UInt8}, x::U29, e::$E)
                 return try_encode!(mem, UInt32(x), e)
             end
         end
@@ -116,12 +116,12 @@ end
 # A custom encoding defined by a format package
 struct CBool <: Encoding end
 BitScribbling.codec_max_encoded_size(::Type{Bool}, ::CBool) = 1
-BitScribbling.codec_encoded_size(::Bool, ::CBool) = 1
+BitScribbling.codec_try_encoded_size(::Bool, ::CBool) = 1
 function BitScribbling.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{Bool}, ::CBool)
     isempty(mem) && return DecodeError(EndOfInput)
     return (!iszero(mem[1]), 1)
 end
-function BitScribbling.codec_encode!(mem::MutableMemoryView{UInt8}, x::Bool, ::CBool)
+function BitScribbling.codec_try_encode!(mem::MutableMemoryView{UInt8}, x::Bool, ::CBool)
     isempty(mem) && return EncodeError(InsufficientSpace)
     mem[1] = x
     return 1
@@ -131,14 +131,14 @@ end
 # of `try_decode` or `encode!` must not reach into the codec.
 struct Probe <: Encoding end
 BitScribbling.codec_max_encoded_size(::Type{Bool}, ::Probe) = 1
-BitScribbling.codec_encoded_size(::Bool, ::Probe) = 1
+BitScribbling.codec_try_encoded_size(::Bool, ::Probe) = 1
 @inline function BitScribbling.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{Bool}, ::Probe)
     isempty(mem) && return DecodeError(EndOfInput)
     checked = false
     @boundscheck checked = true
     return (checked, 1)
 end
-@inline function BitScribbling.codec_encode!(mem::MutableMemoryView{UInt8}, ::Bool, ::Probe)
+@inline function BitScribbling.codec_try_encode!(mem::MutableMemoryView{UInt8}, ::Bool, ::Probe)
     isempty(mem) && return EncodeError(InsufficientSpace)
     checked = false
     @boundscheck checked = true
@@ -151,25 +151,25 @@ struct Liar <: Encoding end
 BitScribbling.codec_max_encoded_size(::Type{<:Union{Int8, Int16, UInt8}}, ::Liar) = 2
 # More bytes than `mem` has
 BitScribbling.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{Int8}, ::Liar) = (Int8(0), length(mem) + 1)
-BitScribbling.codec_encode!(mem::MutableMemoryView{UInt8}, ::Int8, ::Liar) = length(mem) + 1
+BitScribbling.codec_try_encode!(mem::MutableMemoryView{UInt8}, ::Int8, ::Liar) = length(mem) + 1
 # A negative count
 BitScribbling.codec_try_decode(::ImmutableMemoryView{UInt8}, ::Type{Int16}, ::Liar) = (Int16(0), -1)
-BitScribbling.codec_encode!(::MutableMemoryView{UInt8}, ::Int16, ::Liar) = -1
+BitScribbling.codec_try_encode!(::MutableMemoryView{UInt8}, ::Int16, ::Liar) = -1
 # More bytes than `max_encoded_size`, but within `mem`: a bug, but no undefined behaviour,
 # so it's not caught
 BitScribbling.codec_try_decode(::ImmutableMemoryView{UInt8}, ::Type{UInt8}, ::Liar) = (0x00, 3)
-BitScribbling.codec_encode!(::MutableMemoryView{UInt8}, ::UInt8, ::Liar) = 3
+BitScribbling.codec_try_encode!(::MutableMemoryView{UInt8}, ::UInt8, ::Liar) = 3
 
 # An 8-bit character set, which can't encode most `Char`s
 struct Latin1 <: Encoding end
 is_latin1(c::Char) = isvalid(c) && codepoint(c) ≤ 0xff
 BitScribbling.codec_max_encoded_size(::Type{Char}, ::Latin1) = 1
-BitScribbling.codec_encoded_size(c::Char, ::Latin1) = is_latin1(c) ? 1 : EncodeError(InvalidValue)
+BitScribbling.codec_try_encoded_size(c::Char, ::Latin1) = is_latin1(c) ? 1 : EncodeError(InvalidValue)
 function BitScribbling.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{Char}, ::Latin1)
     isempty(mem) && return DecodeError(EndOfInput)
     return (Char(mem[1]), 1)
 end
-function BitScribbling.codec_encode!(mem::MutableMemoryView{UInt8}, c::Char, ::Latin1)
+function BitScribbling.codec_try_encode!(mem::MutableMemoryView{UInt8}, c::Char, ::Latin1)
     is_latin1(c) || return EncodeError(InvalidValue)
     isempty(mem) && return EncodeError(InsufficientSpace)
     mem[1] = codepoint(c) % UInt8
@@ -178,7 +178,7 @@ end
 # Pairs of characters, encoded one by one, so an invalid second character is only found
 # after the first is written
 BitScribbling.codec_max_encoded_size(::Type{Tuple{Char, Char}}, ::Latin1) = 2
-function BitScribbling.codec_encoded_size(x::Tuple{Char, Char}, e::Latin1)
+function BitScribbling.codec_try_encoded_size(x::Tuple{Char, Char}, e::Latin1)
     a = @try_return try_encoded_size(x[1], e)
     b = @try_return try_encoded_size(x[2], e)
     return a + b
@@ -190,7 +190,7 @@ function BitScribbling.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{
     (b, next) = second
     return ((a, b), next - 1)
 end
-function BitScribbling.codec_encode!(mem::MutableMemoryView{UInt8}, x::Tuple{Char, Char}, e::Latin1)
+function BitScribbling.codec_try_encode!(mem::MutableMemoryView{UInt8}, x::Tuple{Char, Char}, e::Latin1)
     # Nothing may be written when there is too little space, so check it first
     length(mem) < 2 && return EncodeError(InsufficientSpace)
     a = @try_return try_encode!(mem, x[1], e)
@@ -387,7 +387,7 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         @test bits_kind(Bool) === BitsStorable()
         @test bits_kind(Fruit) === BitsStorable()
         for T in (Char, Ptr{UInt8}, String, Tuple{Int, Int})
-            @test bits_kind(T) === ManualCodec()
+            @test bits_kind(T) === Opaque()
         end
         native(x) = reinterpret(NTuple{sizeof(x), UInt8}, x)
         @test is_valid_bits(Bool, (0x00,)) && is_valid_bits(Bool, (0x01,))
@@ -1493,7 +1493,7 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         end
         @test occursin("`Padded` has padding on some or all platforms, so it can't be `BitsLoadable`: its field `b` follows 1 bytes of other fields, which is not a multiple of 4, the size of its type `UInt32`", message(Padded))
         @test occursin("`LoadableWithBool` is `BitsLoadable`, but its field `a` has the type `Bool`, which is `BitsStorable`", message(LoadableWithBool))
-        @test occursin("field `c` of `WithChar` has the type `Char`, whose `bits_kind` is `ManualCodec`", message(WithChar))
+        @test occursin("field `c` of `WithChar` has the type `Char`, whose `bits_kind` is `Opaque`", message(WithChar))
         @test occursin("field `p` of `WithPlain` has the type `Plain`", message(WithPlain))
         @test occursin("`Padded` has padding", message(WithPadded))
         HAS_NARROW && @test occursin("whose bit width 30 is not a power of two of at least 8", message(WithNarrow))
