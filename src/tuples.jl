@@ -76,7 +76,7 @@ end
     return tuple_body(
         x, Fs -> [
             :(n = 0);
-            [:(n += @try_return try_encoded_size(x[$i], enc)) for i in eachindex(Fs)];
+            [:(n += @? try_encoded_size(x[$i], enc)) for i in eachindex(Fs)];
             :(return n)
         ]
     )
@@ -91,7 +91,7 @@ end
             [
                 :(offset = 0);
                 [
-                    :(($(xs[i]), offset) = @try_return try_decode_element(mem, offset, $F, enc))
+                    :(($(xs[i]), offset) = @? try_decode_element(mem, offset, $F, enc))
                         for (i, F) in enumerate(Fs)
                 ];
                 :(return (tuple($(xs...)), offset))
@@ -151,12 +151,12 @@ end
         x, Fs -> [
             quote
                 if length(mem) < max_encoded_size($x, enc)
-                    size = @try_return try_encoded_size(x, enc)
+                    size = @? try_encoded_size(x, enc)
                     length(mem) < size && return EncodeError(InsufficientSpace)
                 end
                 offset = 0
             end;
-            [:(offset += @try_return _try_encode!(unsafe_suffix(mem, offset + 1), 1, x[$i], enc)) for i in eachindex(Fs)];
+            [:(offset += @? _try_encode!(unsafe_suffix(mem, offset + 1), 1, x[$i], enc)) for i in eachindex(Fs)];
             :(return offset)
         ]
     )

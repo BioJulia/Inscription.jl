@@ -46,7 +46,7 @@ for (mod, E, desc) in (
 
     The functions of BitScribbling, with the encoding fixed to `$E()`.
     Every function forwards to the function of the same name in BitScribbling,
-    with `$E()` as the last argument. The forwarding propagates `@inbounds`.
+    with `$E()` as the last argument.
 
     The module also exports various other names, so that `using BitScribbling.$mod`
     is all that is needed to use it.
@@ -62,9 +62,9 @@ for (mod, E, desc) in (
         @doc $doc module $mod
         using ..BitScribbling: BitScribbling, $E, MemoryView, MutableMemoryView,
             AbstractBufReader, AbstractBufWriter,
-            DecodeError, DecodeErrorKinds, EncodeError, EncodeErrorKinds, @try_return
+            DecodeError, DecodeErrorKinds, EncodeError, EncodeErrorKinds, @?
 
-        export $(names...), DecodeError, DecodeErrorKinds, EncodeError, EncodeErrorKinds, @try_return
+        export $(names...), DecodeError, DecodeErrorKinds, EncodeError, EncodeErrorKinds, @?
         end
     end
     for (f, args) in convenience_functions

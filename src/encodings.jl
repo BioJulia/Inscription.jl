@@ -1,35 +1,30 @@
 """
     abstract type Encoding end
 
-An encoding says how *one value* of a bits type, i.e. a type for which `isbitstype` is
-true, maps to bytes. Types that refer to other memory, such as `String` and `Vector`,
-are out of scope.
+`Encoding` are zero-sized trait structs used to signal how one `isbits` value
+of a given type `T` is encoded to bytes, and decoded from bytes.
+Thus, reading and writing behaviour is governed by the pair `(T, enc::Encoding)`.
+Such an implementation over a pair is called a "codec".
+Given a single implementation of a codec, encoding, and decoding to and from `MemoryView`,
+and loading and storing to all `AbstractBufReader`s and `AbstractBufWriter`s automatically
+work.
 
-Encodings are singletons, passed as the last argument of every function in this package,
-and resolved at compile time.
+Users are free to define their own `Encoding`s and implement codecs for them.
 
-This package defines [`LittleEndian`](@ref), [`BigEndian`](@ref) and [`UTF8`](@ref).
-Other packages may define their own encodings, for example
-`struct CBool <: Encoding end` for C-style booleans ("nonzero is true").
+Two `Encoding`s are special: [`LittleEndian`](@ref) and [`BigEndian`](@ref),
+together referred to as Endian `Encoding`s.
+Conceptually, these signal loading and storing the raw bits of the value of `T`.
+For example, encoding the `UInt32` `0x01020304` in `LittleEndian` encodes it
+to the following bytes `[0x04, 0x03, 0x02, 0x01]`.
+
+Codecs for Endian `Encoding`s can be automatically implemented via the [`BitsKind`](@ref)
+trait, see the `BitsKind` docstring for details how.
 
 See also: [`Endianness`](@ref)
 
 # Extended help
-## Implementing a codec
-A *codec* makes a value type `T` encodable with an encoding. Once it exists, `T` works
-with every function of this package, such as [`try_decode`](@ref), [`load`](@ref),
-[`store`](@ref) and the bulk functions. Never add methods to those functions directly.
-
-There are three ways to provide a codec, depending on `T`:
-
-| `T` is                                                          | The owner of `T` implements                    |
-|:--------------------------------------------------------------- |:---------------------------------------------- |
-| A primitive type or isbits struct; every bit pattern is a valid `T` | `bits_kind(::Type{T}) = BitsLoadable()`        |
-| A primitive type or isbits struct; its bits are its encoding, but some are invalid | `bits_kind(::Type{T}) = BitsStorable()` and [`is_valid_bits`](@ref) |
-| Anything else, or used with other encodings                     | A hand-written codec, see below                |
-
-The first two only apply to [`LittleEndian`](@ref) and [`BigEndian`](@ref), see
-[`BitsKind`](@ref), which also lists the requirements for structs.
+## Manually implementing a codec
+Before doing so, check if you can opt into already-generated codecs via [`BitsKind`](@ref).
 
 A hand-written codec for `T` and an encoding type `E` consists of four methods:
 * [`codec_max_encoded_size(::Type{T}, ::E)`](@ref codec_max_encoded_size)
@@ -41,33 +36,16 @@ Optionally, it can also implement
 [`codec_bytes_needed(mem::ImmutableMemoryView{UInt8}, ::Type{T}, ::E)`](@ref codec_bytes_needed),
 so that loading a `T` doesn't wait for more bytes than it needs.
 
-A codec must be defined by the owner of either `T` or `E`, so as not to commit type
-piracy.
-
-`E` must be a concrete encoding type, such as `LittleEndian` or `UTF8`, never an abstract
-type or a union such as `Encoding` or [`Endianness`](@ref). To support several
-encodings, define the methods for each of them, e.g. in a loop over the encoding types.
-`T`, on the other hand, may be abstract.
-
-This rule prevents method ambiguities between the codecs of different owners. For
-example, the owner of an encoding `E` may define a codec for all `T <: Integer`, and the
-owner of `MyInt <: Integer` may define one for `MyInt` with `E`. Since both methods are
-for the same concrete `E`, the one for `MyInt` is more specific, and is chosen. If the
-owner of `MyInt` had defined its codec for all encodings instead, neither method would be
-more specific, and calls would throw an ambiguity error.
-
-## Codecs provided by this package
-* `Char` with `UTF8()`.
-* With `LittleEndian()` and `BigEndian()`: the built-in integer and floating-point
-  types, which are `BitsLoadable`, and `Bool` and `Enum` types, which are
-  `BitsStorable`.
+To avoid ambiguity errors, `E` must be a concrete encoding type. Do not implement
+codecs for non-concrete types such as `Encoding` or `Endianness`.
 """
 abstract type Encoding end
 
 """
     LittleEndian() <: Encoding
 
-Encode fixed-size values with the least significant byte first.
+Encoding signifying copying the raw bytes of the value in little-endian byte order.
+See [`Encoding`](@ref) for more details.
 
 See also: [`BigEndian`](@ref), [`NATIVE_ENDIAN`](@ref), [`Endianness`](@ref)
 """
@@ -76,7 +54,8 @@ struct LittleEndian <: Encoding end
 """
     BigEndian() <: Encoding
 
-Encode fixed-size values with the most significant byte first.
+Encoding signifying copying the raw bytes of the value in big-endian byte order.
+See [`Encoding`](@ref) for more details.
 
 See also: [`LittleEndian`](@ref), [`NATIVE_ENDIAN`](@ref), [`Endianness`](@ref)
 """
@@ -85,30 +64,7 @@ struct BigEndian <: Encoding end
 """
     Endianness = Union{LittleEndian, BigEndian}
 
-The byte-order encodings. They encode fixed-size values of bits types as their bits, in
-the given byte order.
-
-A type `T` can be encoded with them if:
-* `T` has a hand-written codec for each of them, see [`Encoding`](@ref). The built-in
-  codecs are listed there.
-* Or, `bits_kind(T)` is [`BitsLoadable`](@ref) or [`BitsStorable`](@ref), and:
-  - if `T` is a primitive type, its bit width is a multiple of 8. So, e.g., a primitive
-    type with 18 bits is rejected, because its encoding would need padding bits;
-  - if `T` is a struct, it has no padding, and its fields satisfy the requirements
-    listed in [`BitsKind`](@ref).
-  Otherwise, an `ArgumentError` is thrown when a `T` is first encoded or decoded.
-
-The encoding of a value always takes whole bytes. Data in which values are packed at the
-bit level, e.g. one 18-bit value starting in the middle of a byte, can't be decoded with
-this package.
-
-When the byte order is only known at runtime, e.g. from a file header, the endianness
-value is of type `Endianness`. Use a function barrier, so the code that uses it is
-specialised and branch-free:
-
-```julia
-e = magic == 0x4949 ? LittleEndian() : BigEndian()
-parse_body(io, e)
+See also: [`Encoding`](@ref) [`LittleEndian`](@ref), [`BigEndian`](@ref) [`NATIVE_ENDIAN`](@ref)
 ```
 """
 const Endianness = Union{LittleEndian, BigEndian}
@@ -117,20 +73,42 @@ const Endianness = Union{LittleEndian, BigEndian}
     NATIVE_ENDIAN::Endianness
 
 The byte order of the host, either `LittleEndian()` or `BigEndian()`.
+As a rule of thumb, avoid implementing codecs for this constant, since it
+makes the implementation platform-dependent in surprising ways.
+Implement a codec for `LittleEndian` or `BigEndian`
 
-Host byte order is never used implicitly by this package. Code that really needs it,
-e.g. for memory-mapped files or same-machine IPC, can use this constant explicitly.
+See also: [`Encoding`](@ref) [`LittleEndian`](@ref), [`BigEndian`](@ref) [`Endianness`](@ref)
 """
 const NATIVE_ENDIAN = ENDIAN_BOM == 0x04030201 ? LittleEndian() : BigEndian()
 
 """
     UTF8() <: Encoding
 
-The UTF-8 encoding of `Char`.
+UTF-8 encoding, e.g. of `Char`.
 
-Decoding follows the iteration of `String` exactly, also for malformed or truncated
-input: decoding never fails on non-empty input, but may produce a malformed `Char`.
-See [`try_decode`](@ref) for details.
+Encoding and decoding follows the iteration of `Base.String`. In details, the rules
+are as follows:
+
+For decoding, the rules are:
+* A lead byte c0-df, e0-ef or f0-f7 starts a `Char` of at most 2, 3 or 4 bytes,
+  respectively.
+  The following bytes are part of the `Char` while they are continuation bytes
+  (80-bf), up to that length.
+* Any other byte (ASCII, a continuation byte, or f8-ff) is decoded alone as a `Char`.
+* The bytes are not validated further, so the decoded `Char` may be malformed or invalid.
+  For example, `[0xe4, 0xb8, 0x30]` decodes as `'\\xe4\\xb8'` followed by `'0'`,
+  and the overlong `[0xc0, 0x80]` as the single Char `'\\xc0\\x80'`.
+* If the input ends partway through a `Char`, as in `[0xc3]`,
+  the bytes so far are decoded as a malformed Char.
+
+For encoding, the codeunits are written in UTF8 form, including for invalid
+UTF8, with the following notable behaviour:
+* A `Char` which could never be decoded according to the above rules, such as
+  `reinterpret(Char, typemax(UInt32))`, can not be encoded and will give an 
+  [`EncodeError`](@ref) of kind `InvalidValue`.
+* The concatenated encoding of multiple invalid `Char`s may be
+  decoded as one valid `Char`. E.g. the concatenated encoding of `'\\xc3'`
+  followed by `'\\xb8'` is `[0xc3, 0xb8]`, which decodes as `'ø'`.
 
 # Examples
 ```jldoctest

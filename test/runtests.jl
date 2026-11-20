@@ -102,7 +102,7 @@ if HAS_NARROW
             BitScribbling.codec_max_encoded_size(::Type{U29}, ::$E) = 4
             BitScribbling.codec_try_encoded_size(::U29, ::$E) = 4
             function BitScribbling.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{U29}, e::$E)
-                raw = @try_return try_decode(mem, UInt32, e)
+                raw = @? try_decode(mem, UInt32, e)
                 raw > 0x1fffffff && return DecodeError(InvalidData)
                 return (U29(raw), 4)
             end
@@ -198,12 +198,12 @@ end
 # after the first is written
 BitScribbling.codec_max_encoded_size(::Type{Tuple{Char, Char}}, ::Latin1) = 2
 function BitScribbling.codec_try_encoded_size(x::Tuple{Char, Char}, e::Latin1)
-    a = @try_return try_encoded_size(x[1], e)
-    b = @try_return try_encoded_size(x[2], e)
+    a = @? try_encoded_size(x[1], e)
+    b = @? try_encoded_size(x[2], e)
     return a + b
 end
 function BitScribbling.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{Tuple{Char, Char}}, e::Latin1)
-    (a, i) = @try_return try_decode_next(mem, 1, Char, e)
+    (a, i) = @? try_decode_next(mem, 1, Char, e)
     second = try_decode_next(mem, i, Char, e)
     second isa DecodeError && return DecodeError(Truncated)
     (b, next) = second
@@ -212,8 +212,8 @@ end
 function BitScribbling.codec_try_encode!(mem::MutableMemoryView{UInt8}, x::Tuple{Char, Char}, e::Latin1)
     # Nothing may be written when there is too little space, so check it first
     length(mem) < 2 && return EncodeError(InsufficientSpace)
-    a = @try_return try_encode!(mem, x[1], e)
-    b = @try_return try_encode!(mem, 1 + a, x[2], e)
+    a = @? try_encode!(mem, x[1], e)
+    b = @? try_encode!(mem, 1 + a, x[2], e)
     return a + b
 end
 
@@ -764,11 +764,35 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
                 end
             end
         end
-        # Round trip is not exact for Chars that no String can contain
-        c = reinterpret(Char, typemax(UInt32))
-        buf = zeros(UInt8, 4)
-        @test encode!(MemoryView(buf), c, UTF8()) == 4
-        @test first.(decode_chars(buf)) == fill('\xff', 4)
+        # Chars that no String can contain can't be encoded, since their code units
+        # would decode to other Chars
+        for u in (
+                typemax(UInt32),  # f8-ff lead with more code units: would be four '\xff'
+                0x41420000,       # ASCII lead with more code units
+                0x80800000,       # stray continuation byte with more code units
+                0xc3a9a900,       # more code units than the lead byte allows
+                0xc3410000,       # non-continuation byte after the lead
+                0xe2008200,       # zero byte inside the code units
+            )
+            c = reinterpret(Char, u)
+            @test try_encoded_size(c, UTF8()) === EncodeError(InvalidValue)
+            buf = zeros(UInt8, 4)
+            @test try_encode!(MemoryView(buf), c, UTF8()) === EncodeError(InvalidValue)
+            @test_throws EncodeError encode!(MemoryView(buf), c, UTF8())
+            @test_throws EncodeError encoded_size(c, UTF8())
+        end
+        # Every Char that String iteration produces can be encoded, so encoding the Chars
+        # of a String gives back its code units, even when it is malformed
+        for s in ("aé€😀", "\xc3A\x80\xff\xe2\x82\xf8\xc0\x80", String([hash(i) % UInt8 for i in 1:10_000]))
+            chars = collect(s)
+            dst = zeros(UInt8, ncodeunits(s))
+            @test encode_every!(MemoryView(dst), MemoryView(chars), UTF8()) == ncodeunits(s)
+            @test dst == codeunits(s)
+        end
+        # But, as for Strings, malformed Chars may merge when encoded one after another
+        buf = zeros(UInt8, 2)
+        @test encode_every!(MemoryView(buf), MemoryView(['\xc3', '\xa9']), UTF8()) == 2
+        @test first.(decode_chars(buf)) == ['é']
 
         s = "aé€😀 hello \xe2\x82 x"
         @test first.(decode_chars(codeunits(s))) == collect(s)
@@ -970,10 +994,10 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         @test sink == bytes_be(UInt64(1))
     end
 
-    @testset "@try_return" begin
+    @testset "@?" begin
         function load_pair(io)
-            a = @try_return try_load(io, UInt16, BigEndian())
-            b = @try_return try_load(io, Bool, BigEndian())
+            a = @? try_load(io, UInt16, BigEndian())
+            b = @? try_load(io, Bool, BigEndian())
             return (a, b)
         end
         @test load_pair(CursorReader([0x00, 0x01, 0x01])) === (0x0001, true)
@@ -982,16 +1006,16 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         @test is_err(load_pair(CursorReader(UInt8[])), EndOfInput)
 
         function decode_pair(mem)
-            (a, i) = @try_return try_decode_next(mem, 1, UInt8, LittleEndian())
-            b = @try_return try_decode(mem, i, UInt8, LittleEndian())
+            (a, i) = @? try_decode_next(mem, 1, UInt8, LittleEndian())
+            b = @? try_decode(mem, i, UInt8, LittleEndian())
             return a + b
         end
         @test decode_pair(MemoryView([0x01, 0x02])) === 0x03
         @test is_err(decode_pair(MemoryView([0x01])), EndOfInput)
 
         function encode_pair!(mem, a, b)
-            n = @try_return try_encode!(mem, a, BigEndian())
-            m = @try_return try_encode!(mem, 1 + n, b, BigEndian())
+            n = @? try_encode!(mem, a, BigEndian())
+            m = @? try_encode!(mem, 1 + n, b, BigEndian())
             return n + m
         end
         v = zeros(UInt8, 3)

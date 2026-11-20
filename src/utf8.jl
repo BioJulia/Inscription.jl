@@ -1,7 +1,22 @@
 codec_max_encoded_size(::Type{Char}, ::UTF8) = 4
 
-# Every Char can be encoded, see `codec_try_encode!`
-codec_try_encoded_size(c::Char, ::UTF8) = ncodeunits(c)
+# Whether `c` is a Char that `codec_try_decode` can return, i.e. one that
+# `iterate(::String)` can produce. Other Chars can only be made with e.g. `reinterpret`,
+# and their code units don't decode to themselves, so they can't be encoded.
+@inline function is_decodable(c::Char)::Bool
+    u = reinterpret(UInt32, c)
+    n = ncodeunits(c)
+    lead = (u >> 24) % UInt8
+    (lead < 0xc0 || lead ≥ 0xf8) && return n == 1
+    max_len = lead < 0xe0 ? 2 : lead < 0xf0 ? 3 : 4
+    n ≤ max_len || return false
+    # Code units 2:n must be continuation bytes. The bytes after them are zero.
+    return ((u & 0x00c0c0c0) ⊻ 0x00808080) >> (8 * (4 - n)) == 0
+end
+
+function codec_try_encoded_size(c::Char, ::UTF8)::Union{Int, EncodeError}
+    return is_decodable(c) ? ncodeunits(c) : EncodeError(InvalidValue)
+end
 
 # Follows `iterate(::String)` exactly, see the docstring of `try_decode`.
 @inline function codec_try_decode(
@@ -39,8 +54,10 @@ end
     return max_len
 end
 
-# Writes the code units of `c` as they are, without validating it.
+# Writes the code units of `c` as they are. Malformed Chars that `iterate(::String)` can
+# produce are written, so that the Chars of any String encode to its code units.
 @inline function codec_try_encode!(mem::MutableMemoryView{UInt8}, c::Char, ::UTF8)::Union{Int, EncodeError}
+    is_decodable(c) || return EncodeError(InvalidValue)
     u = reinterpret(UInt32, c)
     n = ncodeunits(c)
     length(mem) < n && return EncodeError(InsufficientSpace)

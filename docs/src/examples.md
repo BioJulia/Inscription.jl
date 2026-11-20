@@ -15,7 +15,7 @@ loading odd sized primitives
 
 One example like this teaches more than several separate snippets.
 
-2. try_ versus throwing, and @try_return. Show when to use try_decode and when to use decode, and how @try_return passes a DecodeError up through your own function. This is where the package's error design shows up, and readers won't guess it from the reference docs.
+2. try_ versus throwing, and @?. Show when to use try_decode and when to use decode, and how @? passes a DecodeError up through your own function. This is where the package's error design shows up, and readers won't guess it from the reference docs.
 
 3. Reading a stream. Use load/store with a BufferIO reader or writer, e.g. reading length-prefixed records until EOF. Your odd-sized primitives example already uses BufferIO at a lower level (get_nonempty_buffer), so showing the high-level way first would help.
 

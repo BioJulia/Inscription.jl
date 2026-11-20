@@ -2,10 +2,8 @@
     max_encoded_size(::Type{T}, enc::Encoding)::Int
 
 Upper bound on the number of bytes of any encoding of a value of type `T` with `enc`.
-Defined whenever `T` can be encoded or decoded with `enc`.
 
-This function is not an extension point: never add methods to it. Implement a codec
-instead, see [`Encoding`](@ref).
+Do not add methods to this function. Implement a codec instead, see [`Encoding`](@ref).
 
 # Examples
 ```jldoctest
@@ -35,11 +33,7 @@ at most [`max_encoded_size(T, enc)`](@ref max_encoded_size). Since `x` is not en
 this is the way to check whether it can be, or to find the size of a buffer to encode
 it into.
 
-Types that are [`BitsLoadable`](@ref) or [`BitsStorable`](@ref) can always be encoded,
-and their size is that of the type.
-
-This function is not an extension point: never add methods to it. Implement a codec
-instead, see [`Encoding`](@ref).
+Do not add methods to this function. Implement a codec instead, see [`Encoding`](@ref).
 
 See also: [`encoded_size`](@ref)
 
@@ -81,34 +75,23 @@ end
 """
     try_decode(mem, [i::Integer,] ::Type{T}, enc::Encoding)::Union{T, DecodeError}
 
-Decode a `T` from `mem`, starting at index `i` (default: 1), treating the bytes from `i`
-to the end of `mem` as the complete input. Return the value, or a
-[`DecodeError`](@ref).
+Decode a `T` from `mem`, starting at index `i` (default: 1).
+Return the value, or a [`DecodeError`](@ref).
+`mem` is converted to `ImmutableMemoryView{UInt8}`.
+
+The result is the same as decoding from `mem[i:end]`, but without creating the slice.
+`i` must be in `1:length(mem)+1`, or a `LightBoundsError` is thrown.
 
 To also get the index after the encoding, e.g. for types whose encodings vary in size,
 use [`try_decode_next`](@ref). Bytes after the encoding are ignored. To require that the
 encoding ends at the end of `mem`, use [`try_decode_exact`](@ref).
 
-The result is the same as decoding from `mem[i:end]`, but without creating the slice.
-`i` must be in `1:length(mem)+1`, or a `LightBoundsError` is thrown.
-At `i == length(mem) + 1`, there is nothing to decode.
-
-`mem` is a `MemoryView{UInt8}`, mutable or immutable, or other memory that `MemoryView`
-can view as one, such as a `Vector{UInt8}`, a `Memory{UInt8}` or a contiguous view of
-them. Strings, substrings and their `codeunits` are not accepted, since viewing them
-allocates: convert them once with `MemoryView`, and use `i` to decode at different
-positions. The same holds for the memory arguments of all functions of this package.
-
 The error kind is:
 * `EndOfInput` if no bytes remain, unless a `T` can be encoded in zero bytes;
-* `Truncated` if `mem` ends partway through an encoding, unless the encoding defines a
-  meaning for incomplete input, as [`UTF8`](@ref) does;
+* `Truncated` if `mem` ends partway through an encoding;
 * `InvalidData` if the bytes are not a valid encoding.
 
-This function ignores `@inbounds`, see the extended help.
-
-This function is not an extension point: never add methods to it. Implement a codec
-instead, see [`Encoding`](@ref).
+Do not add methods to this function. Implement a codec instead, see [`Encoding`](@ref).
 
 See also: [`decode`](@ref), [`try_load`](@ref)
 
@@ -126,26 +109,11 @@ DecodeError(BitScribbling.DecodeErrorKinds.Truncated)
 julia> try_decode(MemoryView([0x02]), Bool, LittleEndian())
 DecodeError(BitScribbling.DecodeErrorKinds.InvalidData)
 ```
-
-# Extended help
-## `@inbounds`
-`try_decode` ignores `@inbounds`, like `get`: all its checks always run. Input that is
-too short is a property of the data, and handling it is what this function is for, so an
-`@inbounds` meant for other indexing in the same block must not turn it into undefined
-behaviour. To skip the length checks, use [`decode`](@ref) in an `@inbounds` context.
-
-## Char and UTF-8
-`try_decode(mem, Char, UTF8())` follows `String` iteration exactly. The lead byte sets
-the maximum length (`00`–`bf` and `f8`–`ff`: 1 byte, `c0`–`df`: 2, `e0`–`ef`: 3,
-`f0`–`f7`: 4), and each following byte is taken while it is a continuation byte, until
-the maximum length or the end of `mem` is reached. Validity is never checked, so
-overlong encodings, surrogates and truncated sequences decode to a malformed `Char`.
-Therefore, the only possible error is `EndOfInput`, when no bytes remain.
 """
 @inline function try_decode(
         mem::MemoryView{UInt8}, i::Integer, ::Type{T}, enc::Encoding
     )::Union{T, DecodeError} where {T}
-    (x, _) = @try_return try_decode_sized(mem, Int(i)::Int, T, enc)
+    (x, _) = @? try_decode_sized(mem, Int(i)::Int, T, enc)
     return x
 end
 
@@ -157,15 +125,10 @@ end
     decode(mem, [i::Integer,] ::Type{T}, enc::Encoding)::T
 
 Like [`try_decode`](@ref), but throw the [`DecodeError`](@ref) instead of returning it.
+`mem` is converted to `ImmutableMemoryView{UInt8}`.
 
-In an `@inbounds` context, the caller guarantees that `i ≥ 1`, and that at least
-[`max_encoded_size(T, enc)`](@ref max_encoded_size) bytes remain from `i`, i.e.
-`length(mem) - i + 1 ≥ max_encoded_size(T, enc)`. The checks of these conditions, which
-would throw a `LightBoundsError` or an `EndOfInput` or `Truncated` error, may then be
-skipped, and the behaviour is undefined if they don't hold.
-Checks of the decoded bytes themselves are never skipped: for example, decoding a `Bool`
-from the byte `0x02` throws an `InvalidData` error also in an `@inbounds` context.
-The checks of a hand-written codec are its own, and always run.
+In `@inbounds` context, the caller must guarantee that `i ≥ 1`, and that at the `MemoryView`
+has at least length `length(mem) ≥ i - 1 + max_encoded_size(T, enc)`.
 
 See also: [`decode_next`](@ref)
 
@@ -199,8 +162,8 @@ end
     try_decode_next(mem, i::Integer, ::Type{T}, enc::Encoding)::Union{Tuple{T, Int}, DecodeError}
 
 Like [`try_decode`](@ref), but return the value together with the index after its
-encoding, which is where the next value starts. The index is `length(mem) + 1` if the
-encoding ends at the end of `mem`.
+encoding, which is where the next value starts.
+`mem` is converted to `ImmutableMemoryView{UInt8}`.
 
 This is meant for decoding a sequence of values, in particular of types whose encodings
 vary in size, such as `Char` with [`UTF8`](@ref). Like `try_decode`, it ignores
@@ -224,7 +187,7 @@ DecodeError(BitScribbling.DecodeErrorKinds.EndOfInput)
         mem::MemoryView{UInt8}, i::Integer, ::Type{T}, enc::Encoding
     )::Union{Tuple{T, Int}, DecodeError} where {T}
     i = Int(i)::Int
-    (x, n) = @try_return try_decode_sized(mem, i, T, enc)
+    (x, n) = @? try_decode_sized(mem, i, T, enc)
     return (x, i + n)
 end
 
@@ -232,7 +195,9 @@ end
     decode_next(mem, i::Integer, ::Type{T}, enc::Encoding)::Tuple{T, Int}
 
 Like [`try_decode_next`](@ref), but throw the [`DecodeError`](@ref) instead of returning
-it. Supports `@inbounds` in the same way as [`decode`](@ref).
+it. `mem` is converted to `ImmutableMemoryView{UInt8}`.
+
+Supports `@inbounds` in the same way as [`decode`](@ref).
 
 # Examples
 ```jldoctest
@@ -271,11 +236,11 @@ Like [`try_decode`](@ref), but the bytes from `i` (default: 1) to the end of `me
 be exactly one encoding of a `T`. If the encoding ends before the end of `mem`, return a
 [`DecodeError`](@ref) of kind `TrailingData`.
 
-The errors of decoding the value come first: `TrailingData` is only returned if a value
-was decoded. Like `try_decode`, this function ignores `@inbounds`.
+This function is useful when you need *a priori* information to determine when the
+encoding ends. For example, when decoding the decimal string `"12"` to a `UInt8`,
+this could be the concatenated encodings for `0x01`, then `0x02`, or the encoding
+of `UInt8(12)`.
 
-Use it where the input, or a part of it whose size is known, holds a single value, e.g.
-to parse a value from a whole string, or from a field of a known size.
 See also [`try_load_exact`](@ref).
 
 # Examples
@@ -297,7 +262,7 @@ DecodeError(BitScribbling.DecodeErrorKinds.Truncated)
         mem::MemoryView{UInt8}, i::Integer, ::Type{T}, enc::Encoding
     )::Union{T, DecodeError} where {T}
     i = Int(i)::Int
-    (x, n) = @try_return try_decode_sized(mem, i, T, enc)
+    (x, n) = @? try_decode_sized(mem, i, T, enc)
     # `try_decode_sized` checked that `i` is valid and that `n` bytes remain from it
     n == length(mem) - i + 1 || return DecodeError(TrailingData)
     return x
@@ -311,8 +276,7 @@ end
     decode_exact(mem, [i::Integer,] ::Type{T}, enc::Encoding)::T
 
 Like [`try_decode_exact`](@ref), but throw the [`DecodeError`](@ref) instead of returning
-it. Supports `@inbounds` in the same way as [`decode`](@ref). Whether the encoding ends
-at the end of `mem` is always checked, also in an `@inbounds` context.
+it. Supports `@inbounds` in the same way as [`decode`](@ref).
 
 # Examples
 ```jldoctest
@@ -358,20 +322,16 @@ end
         check_start_index(mem, i)
         return DecodeError(i > length(mem) ? EndOfInput : Truncated)
     end
-    x = @try_return unsafe_decode_bits(kind, mem, i - 1, T, enc)
+    x = @? unsafe_decode_bits(kind, mem, i - 1, T, enc)
     return (x, n)
 end
 
 """
     try_encode!(mem, [i::Integer,] x::T, enc::Encoding)::Union{Int, EncodeError}
 
-Encode `x` into `mem`, starting at index `i` (default: 1). Return the number of bytes
-written, or an [`EncodeError`](@ref).
-
-`i` must be in `1:length(mem)+1`, or a `LightBoundsError` is thrown.
-
-`mem` is a `MutableMemoryView{UInt8}`, or other mutable memory that `MemoryView` can
-view as one, such as a `Vector{UInt8}`, see [`try_decode`](@ref).
+Encode `x` into `mem`, starting at index `i` (default: 1).
+Return the number of bytes written, or an [`EncodeError`](@ref).
+`mem` is converted to a `MutableMemoryView{UInt8}`.
 
 The error kind is:
 * `InsufficientSpace` if the bytes from `i` to the end of `mem` are too few for the
@@ -380,18 +340,9 @@ The error kind is:
   [`max_encoded_size(T, enc)`](@ref max_encoded_size) bytes later, but not beyond the
   end of `mem`, may have been written, and their contents are unspecified.
 
-If both apply, either kind may be returned. Use [`try_encoded_size`](@ref) to check
-whether `x` can be encoded without writing anything.
+On success, only the bytes of the encoding are written, no extra bytes.
 
-On success, only the bytes of the encoding are written. If at least
-`max_encoded_size(T, enc)` bytes remain from `i`, encoding fails only if `x` can't be
-encoded.
-
-This function ignores `@inbounds`, like [`try_decode`](@ref). To skip the length checks,
-use [`encode!`](@ref) in an `@inbounds` context.
-
-This function is not an extension point: never add methods to it. Implement a codec
-instead, see [`Encoding`](@ref).
+Do not add methods to this function. Implement a codec instead, see [`Encoding`](@ref).
 
 See also: [`encode!`](@ref), [`store`](@ref)
 
@@ -443,17 +394,11 @@ end
 
 Like [`try_encode!`](@ref), but throw instead of returning an [`EncodeError`](@ref):
 * When the bytes from `i` to the end of `mem` are too few, throw a `LightBoundsError`.
-  It reports the indices that the encoding needed, if they are known. Otherwise, it
-  reports the indices from `i` to `length(mem) + 1`, since at least one more byte was
-  needed.
 * When `x` can't be encoded, throw the `EncodeError` of kind `InvalidValue`.
+
 As for `try_encode!`, if both apply, either may be thrown.
 
-In an `@inbounds` context, the caller guarantees that `i ≥ 1`, and that at least
-[`max_encoded_size(T, enc)`](@ref max_encoded_size) bytes remain from `i`. The checks
-that would throw a `LightBoundsError` may then be skipped, and the behaviour is undefined
-if the guarantees don't hold. Whether `x` can be encoded is always checked.
-The checks of a hand-written codec are its own, and always run.
+`i` must be in `1:length(mem) - `max_encoded_size(T, enc)` + 1`.
 
 # Examples
 ```jldoctest
@@ -518,31 +463,31 @@ end
 """
     codec_max_encoded_size(::Type{T}, ::E)::Int
 
-Extension point of a hand-written codec for the value type `T` and the concrete encoding
-type `E`, see [`Encoding`](@ref). Never call it directly; call [`max_encoded_size`](@ref).
+Get maximum number of bytes which an instance of `T` can be encoded into
+in the encoding `E`.
 
-Return an upper bound on the number of bytes of any encoding of a `T`. The result must
-be constant-foldable. Storing reserves this many bytes before calling
-[`codec_try_encode!`](@ref). Loading buffers this many bytes, if available, before calling
-[`codec_try_decode`](@ref), unless the codec implements
-[`codec_bytes_needed`](@ref) to say that fewer bytes decide the result.
+Adding a method to this function is mandatory to implement when manually implementing a
+codec.
+Storing into `AbstractBufWriter` buffers this many bytes before encoding.
+Loading from `AbstractBufReader` buffers this many bytes before decoding, unless
+the codec implements [`codec_bytes_needed`](@ref).
+
+It should not be called directly. Call [`max_encoded_size`](@ref) instead.
 """
 function codec_max_encoded_size end
 
 """
     codec_try_encoded_size(x::T, ::E)::Union{Int, EncodeError}
 
-Extension point of a hand-written codec for the value type `T` and the concrete encoding
-type `E`, see [`Encoding`](@ref). Never call it directly; call
-[`try_encoded_size`](@ref) or [`encoded_size`](@ref).
+Compute the number of bytes in the encoding of `x`, in an `E <: Encoding`,
+or an error if `x` cannot be encoded into E.
 
-Return the number of bytes of the encoding of `x`, or an [`EncodeError`](@ref) of kind
-`InvalidValue` if `x` can't be encoded. An implementation must follow this contract:
+Adding a method to this function is mandatory to implement when manually implementing a
+codec.
+An implementation must follow this contract:
 * It agrees with [`codec_try_encode!`](@ref): it returns a size exactly when `codec_try_encode!`
   can encode `x`, and the size is the byte count that `codec_try_encode!` returns.
 * It returns no other error kind than `InvalidValue`.
-
-The contract is not checked.
 """
 function codec_try_encoded_size end
 
@@ -551,39 +496,32 @@ function codec_try_encoded_size end
         mem::ImmutableMemoryView{UInt8}, ::Type{T}, ::E
     )::Union{Tuple{T, Int}, DecodeError}
 
-Extension point of a hand-written codec for the value type `T` and the concrete encoding
-type `E`, see [`Encoding`](@ref). Never call it directly; call [`try_decode`](@ref) or
-[`try_decode_next`](@ref).
+Decode a `T` from the start of `mem`, an return it along with the number of bytes
+decoded, or return a [`DecodeError`](@ref) on error.
 
-Decode a `T` from the start of `mem`, as described for [`try_decode`](@ref), and return
-it with the number of bytes used, `n`, or return a [`DecodeError`](@ref).
-An implementation must follow this contract:
-1. **Pure.** The result depends only on the contents of `mem`, and no reference to
-   `mem` is kept.
-2. **Bounded.** On success, `0 ≤ n ≤ min(length(mem), max_encoded_size(T, enc))`.
-3. **`mem` is the complete input.** The end of `mem` is the end of the data.
-   An empty `mem` gives `EndOfInput`, unless a `T` can be encoded in zero bytes.
-   A `mem` that ends partway through an encoding gives `Truncated`, unless the
-   encoding defines a meaning for incomplete input.
-4. **Decided by the first `max_encoded_size(T, enc)` bytes.** If
-   `length(mem) ≥ max_encoded_size(T, enc)`, the result is the same for every memory
-   that starts with those bytes.
+Adding a method to this function is mandatory to implement when manually implementing a
+codec.
+It should not be called directly. Decoding methods call this implicitly.
 
-Rule 4 is what allows loading from a reader's buffer, which is not the complete input.
-To let loads decide with fewer bytes, a codec can also implement
-[`codec_bytes_needed`](@ref).
+An implementation should have the following properties:
+* It should be pure, in the sense that the result should depend only at most the `n`
+  bytes read, where `n` is the number returned from the function.
+* On success, `0 ≤ n ≤ min(length(mem), max_encoded_size(T, enc))`.
 
-## The length of `mem`
-`mem` may have any length, including zero, so it may not contain a full `T`. Not even
-`max_encoded_size(T, enc)` bytes are guaranteed: when decoding from a memory view, `mem`
-is the rest of the caller's view, and when loading from a reader, the input may end
-before that many bytes are buffered. An `@inbounds` in the caller does not apply to the
-codec, so the codec must check the length of `mem` itself.
+The errors returned should have the following [`DecodeErrorKind`](@ref):
+* An empty `mem` gives `EndOfInput`, unless the `T` is decoded from zero bytes.
+* Otherwise, a too short `mem` should return `Truncated`.
+
+`mem` may have any length, including zero, and may not contain a full `T`.
 
 To index `mem` without bounds checks, check its length once, then use `@inbounds`. For
-example, for a 24-bit unsigned integer `struct U24; x::UInt32; end` encoded in 3 bytes:
+example, for a 24-bit unsigned integer `U24` below:
 
 ```julia
+struct U24
+    x::UInt32
+end
+
 @inline function BitScribbling.codec_try_decode(
         mem::ImmutableMemoryView{UInt8}, ::Type{U24}, ::BigEndian
     )
@@ -593,21 +531,13 @@ example, for a 24-bit unsigned integer `struct U24; x::UInt32; end` encoded in 3
     return (U24(x), 3)
 end
 ```
-
-If the codec is `@inline`, the compiler usually removes the length check when the caller
-already knows the length, e.g. when loading from a reader that has buffered at least
-`max_encoded_size(T, enc)` bytes.
-
-## Checked rules
-The rules are not checked, with one exception: an `ErrorException` is thrown if the
-returned byte count is not in `0:length(mem)`, also in an `@inbounds` context. This is
-because the byte count is used to consume bytes from readers, so a codec that broke its
-contract in this way would otherwise corrupt memory.
 """
 function codec_try_decode end
 
 """
     codec_bytes_needed(mem::ImmutableMemoryView{UInt8}, ::Type{T}, ::E)::Int
+
+Compute the 
 
 Optional extension point of a hand-written codec for the value type `T` and the concrete
 encoding type `E`, see [`Encoding`](@ref). Never call it directly.

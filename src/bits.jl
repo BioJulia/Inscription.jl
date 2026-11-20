@@ -1,135 +1,66 @@
 """
     abstract type BitsKind end
 
-The kinds of [`bits_kind`](@ref), currently: [`BitsLoadable`](@ref),
-[`BitsStorable`](@ref) and [`Opaque`](@ref).
+Zero-sized trait struct. 
+By implementing the `BitScribbling.bits_kind(::Type{T})` function for your type `T`,
+you can automatically generate a codec for `T` the [`LittleEndian`](@ref)
+and [`BigEndian`](@ref) ("endian") encodings.
 
-These zero-sized trait structs describe the bits of a primitive type or isbits struct
-`T`, independent of any encoding:
-* If a `T` is exactly its bits, and every bit pattern is a valid `T`, `bits_kind(T)`
-  should be `BitsLoadable()`. Examples: `UInt32`, `Float64`.
-* Else, if a `T` is exactly its bits, but some bit patterns are not valid, `bits_kind(T)`
-  should be `BitsStorable()`. Examples: `Bool`, `Enum` types.
-* Else, `bits_kind(T)` should be `Opaque()`, which is the default for all types.
-  Examples: `Char`.
+Currently, the options are [`BitsLoadable`](@ref), [`BitsStorable`](@ref) and [`Opaque`](@ref).
 
-Each encoding decides whether it uses `bits_kind`. The byte-order encodings,
-[`LittleEndian`](@ref) and [`BigEndian`](@ref), encode a `BitsLoadable` or `BitsStorable`
-`T` as its bits, in the given byte order, if the bits of `T` fill whole bytes; see below
-for the exact requirements. Other encodings, such as [`UTF8`](@ref), ignore `bits_kind`
-and always use a hand-written codec.
+Implement with e.g. `BitScribbling.bits_kind(::Type{MyType}) = BitScribbling.BitsStorable()`.
+Defaults to [`Opaque`](@ref), where no implementation is auto-generated.
 
-Only the owner of `T` may declare it to be `BitsLoadable` or `BitsStorable`, since it
-makes the bits of `T` part of its encodings.
+If `isbitstype(T)`,
+and `T` has a bit-size a multiple of 8 (i.e. occupies an integer number of bytes), 
+and the little/big endian encoding of `T` is identical to the in-memory representation
+of `T`, then `bits_kind(T)` can be `BitsLoadable` or `BitsStorable`.
+Else, it must remain `Opaque`.
+
+If all bitpatterns are valid, it can be `BitsLoadable`. Then, encoding, decoding, storing
+and loading is automatically implemented as simply copying bytes in memory.
+Examples of this include `UInt64` and `Float32`.
+
+Else, if some bitpatterns are invalid, it can be `BitsStorable`. Then, the type also can be
+encoded, decoded, loaded and stored by copying bytes directly, but after decoding or loading,
+the bytes must be validated with [`is_valid_bits`](@ref), which then must be implemented.
+
+See also: [`is_valid_bits`](@ref)
 
 # Extended help
-## Primitive types
-The byte-order encodings accept a `BitsLoadable` or `BitsStorable` primitive type `T`
-only if its bit width, `Base.bitsizeof(T)` (before Julia 1.14: `8 * sizeof(T)`), is a
-multiple of 8. Its encoding is then exactly its bits, in `bitsizeof(T) ÷ 8` bytes.
-Since Julia 1.14, `sizeof` is rounded up, e.g. to 4 bytes for a 24-bit type, but that
-padding is not part of the encoding.
-
-Since Julia 1.14, primitive types may also have other bit widths, e.g. 18 bits. Encoding
-such a type in whole bytes would need padding bits, so the byte-order encodings reject
-it, and throw an `ArgumentError` when it is first encoded or decoded. The bits of such a
-type may also be packed with the bits of other values, e.g. one 18-bit value starting in
-the middle of the third byte of the previous one. This package works on whole bytes, so
-it can't decode such data.
-
-To encode such a type with a byte order anyway, leave its `bits_kind` as `Opaque`,
-and write a codec for `LittleEndian` and `BigEndian`, see [`Encoding`](@ref). The codec
-then decides how the value fills whole bytes, e.g. zero-extended to 3 bytes, and what
-decoding does with bits that are not part of the value.
-
 ## Structs
-An isbits struct `T` that is `BitsLoadable` or `BitsStorable` is encoded as its memory
-representation, with the bytes of each primitive field, including those in nested
-structs, in the byte order of the encoding. With the native byte order, this is
-exactly its representation in memory.
+An `isbitstype` struct `T` has three requirements to be `BitsLoadable` or `BitsStorable`,
+in addition to the above requrement that its encoding must equal its memory representation:
 
-Such a struct must satisfy these requirements, which are checked when it is first
-encoded or decoded. If they don't hold, an `ArgumentError` is thrown:
-* The [`bits_kind`](@ref) of each field is not `Opaque`, and the fields that are
-  structs satisfy these requirements themselves.
-* If `T` is `BitsLoadable`, all its fields are `BitsLoadable`.
-* The bit width of each primitive field is a power of two, and at least 8, as for
-  `UInt8`, `Float32` or `Int128`. So a field can't be e.g. a `primitive type Foo 24 end`.
-* `T` has no padding on any platform.
-* `T` is not of size zero, so it can't be e.g. a struct without fields.
-
-Whether a struct has padding depends on the alignment of its fields, which depends on
-the platform and the Julia version. For example, `UInt64` is aligned to 8 bytes on
-x86-64, but may be aligned to 4 bytes on 32-bit platforms. Therefore, the last
-requirement is checked against the strictest layout that any platform could give `T`:
-the one in which every primitive type is aligned to its size. In this layout, the fields
-follow each other without gaps, and
-* each primitive field must start at a multiple of its size;
-* each field that is a struct must start at a multiple of the size of its largest
-  primitive field;
-* the size of `T` must be a multiple of the size of its largest primitive field.
-
-This makes the check, and so the encoding, the same on every platform and Julia version.
-For example, a struct with the fields `a::UInt32` and `b::UInt64` is rejected also on
-platforms where it has no padding. To satisfy the requirement, order the fields from
-largest to smallest, or add fields for the padding, e.g. `pad::UInt32`.
-
-Declare fields with explicit widths, such as `Int64`, never `Int` or `UInt`, whose
-widths depend on the platform. This can't be checked, since `Int` is the same type as
-`Int64` or `Int32`.
+1. All its fields must be `BitsLoadable` for `T` to be `BitsLoadable`, and its fields must
+   be `BitsLoadable` or `BitsStorable` for `T` to be `BitsStorable`
+2. `T` must not have size zero
+3. `T` must have no padding on any platform. The padding check is done by assuming
+   the alignment of any primitive is equal to the next power of two equal to or
+   larger than its bitsize,
+   and that the alignment of any struct is equal to its largest field.
+   This is the most conservative possible rule.
 """
 abstract type BitsKind end
 
 """
     BitsLoadable() <: BitsKind
 
-Implementing `bits_kind(::Type{T}) = BitsLoadable()` signals that a value of the primitive
-type or isbits struct `T` is exactly its bits, and that every bit pattern is a valid `T`.
-So a `T` can be made from any bits, e.g. by casting raw memory with a pointer load.
-Examples: `UInt32`, `Float64`, `UInt8`.
-
-For such a type `T`, implement only:
-* `bits_kind(::Type{T}) = BitsLoadable()`
-
-See [`BitsKind`](@ref) for which types the byte-order encodings accept, and for the
-requirements of structs.
+Zero-sized trait. See See [`BitsKind`](@ref) for details.
 """
 struct BitsLoadable <: BitsKind end
 
 """
     BitsStorable() <: BitsKind
 
-Implementing `bits_kind(::Type{T}) = BitsStorable()` signals that a value of the primitive
-type or isbits struct `T` is exactly its bits, so it can be stored by writing them, e.g.
-with a pointer store. However, not all bit patterns are valid. Hence, when decoding a
-`T`, its bits are first checked with [`is_valid_bits`](@ref).
-
-For such a type `T`, implement:
-* `bits_kind(::Type{T}) = BitsStorable()`
-* `is_valid_bits(::Type{T}, bytes::NTuple{N, UInt8})::Bool`
-
-See [`BitsKind`](@ref) for which types the byte-order encodings accept, and for the
-requirements of structs.
+Zero-sized trait. See See [`BitsKind`](@ref) for details.
 """
 struct BitsStorable <: BitsKind end
 
 """
     Opaque() <: BitsKind
 
-The default value of `bits_kind(T)` is `Opaque()`. It signals that the encoding of a
-`T` is not its representation in memory, so encoding and decoding it requires a
-hand-written codec. This is the case for many bits types, e.g. `Char`, as well as for
-types that are not bits types.
-
-For such a type `T`, implement for each supported concrete encoding type `E`, see
-[`Encoding`](@ref):
-* [`codec_max_encoded_size(::Type{T}, ::E)`](@ref codec_max_encoded_size)
-* [`codec_try_encoded_size(x::T, ::E)`](@ref codec_try_encoded_size)
-* [`codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{T}, ::E)`](@ref codec_try_decode)
-* [`codec_try_encode!(mem::MutableMemoryView{UInt8}, x::T, ::E)`](@ref codec_try_encode!)
-
-Optionally, also implement
-[`codec_bytes_needed(mem::ImmutableMemoryView{UInt8}, ::Type{T}, ::E)`](@ref codec_bytes_needed).
+Zero-sized trait. See See [`BitsKind`](@ref) for details.
 """
 struct Opaque <: BitsKind end
 
@@ -156,26 +87,17 @@ bits_kind(::Type{<:Enum}) = BitsStorable()
 """
     is_valid_bits(::Type{T}, bytes::NTuple{N, UInt8})::Bool
 
-Whether the bytes `bytes` are a valid `T`, for a type `T` whose [`bits_kind`](@ref) is
-[`BitsStorable`](@ref). The owner of such a type must implement this method.
+Whether the bytes `bytes` are a valid `T`, for a type `T`.
+This function is only called for types for which `bits_kind(T) === BitsStorable()`,
+see [`BitsKind`](@ref).
 
-`N` is the number of bytes of the bits of `T`: `Base.bitsizeof(T) ÷ 8` for primitive
-types, and `sizeof(T)` for structs. The bytes are in native byte order: the byte order of
-the encoding has already been undone. So, if `bytes` are valid, they are the bits of the
-value `x` that is being decoded:
-* If `sizeof(T) == N`, `reinterpret(T, bytes)` gives the value. Since Julia 1.14,
-  `sizeof` of e.g. a 24-bit primitive type is rounded up to 4, and `reinterpret` throws.
-* For integer checks, use [`as_unsigned`](@ref).
-* If `T` is a struct, `is_valid_bits` is called after the `is_valid_bits` of its
-  `BitsStorable` fields. So, all fields are valid, and `reinterpret(T, bytes)` is safe.
-  This method only needs to check the invariants that involve the whole value, and may
-  simply return `true` if there are none.
+`N` is the number of bytes of `T`.
+The bytes are in given in native byte order, i.e. after any potential byte swapping.
+So, if `bytes` are valid, they are the raw bits of `T`, and the instance of `T` may
+be created with `reinterpret(T, bytes)`.
 
-# Examples
-```julia
-primitive type Digit 8 end # 0 to 9
-BitScribbling.bits_kind(::Type{Digit}) = BitScribbling.BitsStorable()
-BitScribbling.is_valid_bits(::Type{Digit}, bytes::NTuple{1, UInt8}) = bytes[1] ≤ 0x09
+For easier bit manipulation, you can use the helper function [`as_unsigned`](@ref)
+to convert `bytes` to an `Unsigned` integer in native byte order.
 ```
 """
 function is_valid_bits end
@@ -221,13 +143,17 @@ to_int(x::Enum{T}) where {T} = Core.Intrinsics.bitcast(T, x)
 """
     as_unsigned(bytes::NTuple{N, UInt8})::Unsigned
 
-Convert `bytes`, given in native byte order, to the smallest of `UInt8`, `UInt16`,
-`UInt32`, `UInt64` and `UInt128` with at least `N` bytes, zero-extended.
+Convert `bytes`, to the smallest of `UInt8`, `UInt16`, `UInt32`, `UInt64` and `UInt128`
+that has at least `N` bytes, zero-extended.
 Throw an `ArgumentError` if `N > 16`.
 
-This is meant for implementing [`is_valid_bits`](@ref), whose bytes are in native byte
-order, so that the byte order of the host doesn't matter. If `N` is the size of the
-result, this is `reinterpret(U, bytes)`.
+This is a helper function that users can call in [`is_valid_bits`](@ref),
+if they find it easier to operate on an `Unsigned` value rather than an `NTuple{N, UInt8}`.
+
+The input `bytes` is given in native byte order. So, for example, if `N == 8`,
+this function is equivalent to `reinterpret(UInt64, bytes)`.
+When used inside `is_valid_bits`, the byte order has already been made native, so
+users need not handle endianness.
 
 # Examples
 ```jldoctest

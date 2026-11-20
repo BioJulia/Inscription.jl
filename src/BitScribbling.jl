@@ -1,7 +1,7 @@
 """
     module BitScribbling
 
-Encode and decode values of bits types, i.e. types for which `isbitstype` is true, to
+Encode and decode values of bitstypes, i.e. types for which `isbitstype` is true, to
 and from byte arrays and BufferIO's IO types.
 """
 module BitScribbling
@@ -27,7 +27,7 @@ export Encoding,
     DecodeErrorKinds,
     EncodeError,
     EncodeErrorKinds,
-    @try_return,
+    @?,
     max_encoded_size,
     try_encoded_size,
     encoded_size,

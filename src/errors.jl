@@ -9,7 +9,8 @@ module DecodeErrorKinds
 
     Enum indicating why decoding or loading a value failed. The current list is
     non-exhaustive, and more may be added in future releases.
-    The integral values of these enums are subject to change in minor versions.
+    The integral values of these enums are subject to change in minor versions,
+    but its type is guaranteed `UInt8`.
 
     Current kinds:
     * [`DecodeErrorKinds.EndOfInput`](@ref)
@@ -49,9 +50,9 @@ module DecodeErrorKinds
         TrailingData
 
     A value was decoded, but the input continues after its encoding, where the input
-    should hold exactly one encoded value. Only returned by the functions that decode
-    exactly, such as [`try_decode_exact`](@ref BitScribbling.try_decode_exact) and
-    [`try_load_exact`](@ref BitScribbling.try_load_exact).
+    should hold exactly one encoded value. Only returned or thrown by the functions
+    that decode exactly, such as [`try_decode_exact`](@ref BitScribbling.try_decode_exact)
+    and [`try_load_exact`](@ref BitScribbling.try_load_exact).
     """
     TrailingData
 
@@ -68,10 +69,8 @@ A failure to decode or load a value, caused by the data. It has the public prope
 
 Functions prefixed with `try_` return a `DecodeError` instead of throwing it.
 The functions without the prefix throw the same value.
-`DecodeError` is a 1-byte isbits type, so returning `Union{T, DecodeError}` does not
-allocate.
 
-See also: [`DecodeErrorKinds.DecodeErrorKind`](@ref), [`@try_return`](@ref)
+See also: [`DecodeErrorKinds.DecodeErrorKind`](@ref), [`@?`](@ref)
 
 # Examples
 ```jldoctest
@@ -124,7 +123,8 @@ module EncodeErrorKinds
 
     Enum indicating why encoding or storing a value failed. The current list is
     non-exhaustive, and more may be added in future releases.
-    The integral values of these enums are subject to change in minor versions.
+    The integral values of these enums are subject to change in minor versions,
+    but its type is guaranteed `UInt8`.
 
     Current kinds:
     * [`EncodeErrorKinds.InsufficientSpace`](@ref)
@@ -169,13 +169,11 @@ Functions prefixed with `try_` return an `EncodeError` instead of throwing it:
 
 The functions without the prefix throw an `InvalidValue` error as it is. [`encode!`](@ref)
 throws a `LightBoundsError` instead of an `InsufficientSpace` error.
-`EncodeError` is a 1-byte isbits type, so returning `Union{Int, EncodeError}` does not
-allocate.
 
 Types that are [`BitsLoadable`](@ref) or [`BitsStorable`](@ref) can always be encoded,
 so with them, an `EncodeError` always has the kind `InsufficientSpace`.
 
-See also: [`EncodeErrorKinds.EncodeErrorKind`](@ref), [`@try_return`](@ref)
+See also: [`EncodeErrorKinds.EncodeErrorKind`](@ref), [`@?`](@ref)
 
 # Examples
 ```jldoctest
@@ -201,19 +199,16 @@ function Base.showerror(io::IO, err::EncodeError)
 end
 
 """
-    @try_return expr
+    @? expr
 
 Evaluate `expr`. If the result is a [`DecodeError`](@ref) or an [`EncodeError`](@ref),
 return it from the enclosing function. Otherwise, the macro evaluates to the result.
 
-!!! note
-    The name of this macro is provisional.
-
 # Examples
 ```jldoctest
 julia> function load_pair(io)
-           a = @try_return try_load(io, UInt16, BigEndian())
-           b = @try_return try_load(io, UInt16, BigEndian())
+           a = @? try_load(io, UInt16, BigEndian())
+           b = @? try_load(io, UInt16, BigEndian())
            return (a, b)
        end;
 
@@ -224,7 +219,7 @@ julia> load_pair(BufferIO.CursorReader([0x00, 0x01, 0x00]))
 DecodeError(BitScribbling.DecodeErrorKinds.Truncated)
 ```
 """
-macro try_return(expr)
+macro var"?"(expr)
     return quote
         result = $(esc(expr))
         result isa Union{DecodeError, EncodeError} && return result

@@ -3,28 +3,9 @@
 
 Load a value of type `T` from `io`, and consume its bytes.
 If the data does not hold a complete, valid encoding of a `T`, return a
-[`DecodeError`](@ref) and consume nothing.
+[`DecodeError`](@ref).
 
-| Situation                                     | Result                              |
-|:--------------------------------------------- |:----------------------------------- |
-| Complete, valid encoding available            | the value; its bytes are consumed   |
-| EOF with no bytes left                        | `DecodeError(EndOfInput)`           |
-| EOF partway through an encoding               | `DecodeError(Truncated)`            |
-| Invalid encoding                              | `DecodeError(InvalidData)`          |
-
-A load either consumes a whole encoding and returns a value, or consumes nothing.
-
-`try_load` waits until the bytes buffered in `io` decide the value, or `io` reaches EOF.
-For most types, that is when [`max_encoded_size(T, enc)`](@ref max_encoded_size) bytes
-are buffered. A hand-written codec can decide with fewer bytes by implementing
-[`codec_bytes_needed`](@ref). For example, a `Char` with [`UTF8`](@ref) waits only for
-the bytes of the next character, and the byte after it if the character is malformed.
-
-Throw an `IOError` of kind `BufferTooShort` if `io` must buffer more bytes than its
-capacity. This can only happen if the capacity is smaller than `max_encoded_size(T, enc)`,
-and never happens for readers that can expand their buffer, such as those returned by
-`BufferIO.expandable`. With such a too-small reader, whether it happens may depend on
-the data, e.g. if the data ends first.
+A load either consumes a whole encoding and returns a value, or throws and consumes nothing.
 
 See also: [`load`](@ref), [`try_decode`](@ref), [`load_into!`](@ref)
 
@@ -44,9 +25,40 @@ julia> try_load(io, UInt8, LittleEndian())
 julia> try_load(io, UInt8, LittleEndian())
 DecodeError(BitScribbling.DecodeErrorKinds.EndOfInput)
 ```
+
+# Extended help
+## Buffering behaviour
+This function calls `grow_buffer` until `io` is EOF, or enough bytes has been buffered
+in IO to decode the value, or to decide the value is invalid.
+By default, that is when [`max_encoded_size(T, enc)`](@ref max_encoded_size) bytes
+are buffered.
+For variable-length encodings, like `Char`'s `UTF8` encoding, this can cause blocking.
+Suppose `io` contains the single byte `'a'` (byte `0x61`) and blocks until that is read.
+A char encodes in up to 4 bytes, so `io` would wait indefinitely for more bytes to arrive.
+But, because `codec_bytes_needed([0x61], Char, UTF8())` is implemented and returns 1,
+`io` will know to only buffer 1 byte and so will not block.
+
+## Too short buffers
+If `io` is not EOF, and its buffer contains fewer bytes than needed according to the
+section above, and its buffer cannot grow, throw an `IOError` of kind `BufferTooShort`.
+Therefore, you must ensure that a partial value is never in a non-growable buffer.
+To handle generic `AbstractBufReader`s, you can use `BufferIO.expandable`, which 
+guarantees this does not happen.
+
+## Error kinds
+The `DecodeErrorKind` in the thrown error is given by this table
+
+| Situation                                     | Result                              |
+|:--------------------------------------------- |:----------------------------------- |
+| Complete, valid encoding available            | the value; its bytes are consumed   |
+| EOF with no bytes left                        | `DecodeError(EndOfInput)`           |
+| EOF partway through an encoding               | `DecodeError(Truncated)`            |
+| Invalid encoding                              | `DecodeError(InvalidData)`          |
+
+
 """
 @inline function try_load(io::AbstractBufReader, ::Type{T}, enc::Encoding)::Union{T, DecodeError} where {T}
-    (x, _) = @try_return try_load_sized(io, T, enc)
+    (x, _) = @? try_load_sized(io, T, enc)
     return x
 end
 
@@ -173,7 +185,7 @@ DecodeError(BitScribbling.DecodeErrorKinds.Truncated)
         # `buffer_value` returns fewer bytes only at EOF
         length(buffer) < nbytes && return DecodeError(isempty(buffer) ? EndOfInput : Truncated)
     end
-    x = @try_return try_decode_exact((@inbounds buffer[1:nbytes]), T, enc)
+    x = @? try_decode_exact((@inbounds buffer[1:nbytes]), T, enc)
     @inbounds consume(io, nbytes)
     return x
 end
