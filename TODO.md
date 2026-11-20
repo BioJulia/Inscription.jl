@@ -1,17 +1,10 @@
-* Play around with it
-    implement a codec of each type
-        primitive loadable
-        storable
-        codec
-        odd sized primitive
-        custom struct
-        one with variable length encoding
+* Docs:
+    Examples
+    Copy-edit
+
+    Ask AI for feedback
 
 * Read all docstrings and review them
-
-* Review the code
-
-* Scan the tests
 
 * Write an AGENTS
     Speed is important

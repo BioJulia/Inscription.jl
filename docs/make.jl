@@ -18,6 +18,9 @@ makedocs(
     # These two pages are recommended, you can add more as you wish
     pages = [
         "BitScribbling" => "index.md",
+        "Concepts" => "concepts.md",
+        "Usage" => "usage.md",
+        "Implementing a type" => "custom.md",
         "Reference" => "reference.md",
     ],
     authors = "Jakob Nybo Andersen",
