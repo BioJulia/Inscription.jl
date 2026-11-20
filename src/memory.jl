@@ -95,12 +95,20 @@ Base.@propagate_inbounds function encode!(mem, x, enc::Encoding)
     return encode!(output_bytes(mem), x, enc)
 end
 
-function decode_into!(dst, src, enc::Encoding)
-    return decode_into!(output_elements(dst), input_bytes(src), enc)
+function decode_all!(dst, src, enc::Encoding)
+    return decode_all!(output_elements(dst), input_bytes(src), enc)
 end
 
-function encode_into!(dst, src, enc::Encoding)
-    return encode_into!(output_bytes(dst), input_elements(src), enc)
+function decode_every!(dst, src, enc::Encoding)
+    return decode_every!(output_elements(dst), input_bytes(src), enc)
+end
+
+function encode_all!(dst, src, enc::Encoding)
+    return encode_all!(output_bytes(dst), input_elements(src), enc)
+end
+
+function encode_every!(dst, src, enc::Encoding)
+    return encode_every!(output_bytes(dst), input_elements(src), enc)
 end
 
 function load_into!(io::AbstractBufReader, dst, enc::Encoding)
@@ -111,12 +119,18 @@ function load_all!(io::AbstractBufReader, dst, enc::Encoding)
     return load_all!(io, output_elements(dst), enc)
 end
 
-# Returns `dst` itself, not its view, like `Base.read!`
-function load!(io::AbstractBufReader, dst, enc::Encoding)
-    load!(io, output_elements(dst), enc)
-    return dst
+function load_every!(io::AbstractBufReader, dst, enc::Encoding)
+    return load_every!(io, output_elements(dst), enc)
+end
+
+function store_into(io::AbstractBufWriter, src, enc::Encoding)
+    return store_into(io, input_elements(src), enc)
 end
 
 function store_all(io::AbstractBufWriter, src, enc::Encoding)
     return store_all(io, input_elements(src), enc)
+end
+
+function store_every(io::AbstractBufWriter, src, enc::Encoding)
+    return store_every(io, input_elements(src), enc)
 end

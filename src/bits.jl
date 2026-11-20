@@ -192,7 +192,7 @@ is_valid_bits(::Type{Bool}, bytes::NTuple{1, UInt8}) = bytes[1] ≤ 0x01
     return if contiguous
         (raw - lo) ≤ span
     else
-        any(x -> Integer(x) % typeof(raw) == raw, instances(T))
+        any(x -> to_int(x) % typeof(raw) == raw, instances(T))
     end
 end
 
@@ -201,17 +201,22 @@ end
 # `U` wraps around, so `raw - lo ≤ span` is a range check also for signed base types.
 # This doesn't use `typemin(T)` and `typemax(T)`: they go through the checked constructor
 # of `T`, which looks the value up in a `Dict` at runtime when the values have gaps.
-# The effects allow the compiler to evaluate this at compile time.
-Base.@assume_effects :foldable function enum_range(::Type{T}, ::Type{U}) where {T <: Enum, U}
+# This is constant-folded if `instances(T)` is, as it is for `@enum` types. The loop over
+# the tuple of instances ends, but the compiler can't prove it, so that is assumed.
+Base.@assume_effects :terminates_locally function enum_range(::Type{T}, ::Type{U}) where {T <: Enum, U}
     values = instances(T)
-    lo = hi = Integer(first(values))
+    lo = hi = to_int(first(values))
     for x in values
-        lo = min(lo, Integer(x))
-        hi = max(hi, Integer(x))
+        lo = min(lo, to_int(x))
+        hi = max(hi, to_int(x))
     end
     span = (hi - lo) % U
     return (lo % U, span, span == length(values) - 1)
 end
+
+# The value of the enum `x` as its base type. Unlike `Integer(x)`, this can't be
+# overloaded by the owner of the enum type, so it is known to be foldable.
+to_int(x::Enum{T}) where {T} = Core.Intrinsics.bitcast(T, x)
 
 """
     as_unsigned(bytes::NTuple{N, UInt8})::Unsigned
@@ -271,75 +276,13 @@ end
     kind = bits_kind(T)::BitsKind
     kind isa Opaque && return kind
     message = bits_type_error(T, kind)
-    message === nothing || throw(ArgumentError(message))
+    message === nothing || throw_bits_type_error(message)
     return kind
 end
 
-kind_name(kind::BitsKind) = nameof(typeof(kind))
+@noinline throw_bits_type_error(message::Tuple) = throw(ArgumentError(string(message...)))
 
-# Why T, whose `bits_kind` is `kind`, can't be a bits type, or `nothing` if it can.
-# See the docstring of `BitsKind` for the requirements.
-Base.@assume_effects :foldable function bits_type_error(
-        ::Type{T}, kind::BitsKind
-    )::Union{Nothing, String} where {T}
-    if isprimitivetype(T)
-        n_bits = bit_size(T)
-        n_bits % 8 == 0 && return nothing
-        return "`bits_kind($T)` is `$(kind_name(kind))`, but the bit width $n_bits of `$T` is not " *
-            "a multiple of 8, so `LittleEndian` and `BigEndian` can't encode it as its bits. " *
-            "To encode it in whole bytes, leave its `bits_kind` as `Opaque`, and write a codec " *
-            "for each byte order"
-    end
-    if !(isstructtype(T) && isbitstype(T))
-        return "`bits_kind($T)` is `$(kind_name(kind))`, but `$T` is neither a primitive type nor an isbits struct"
-    end
-    if iszero(sizeof(T))
-        return "`$T` has a size of zero bytes, so it can't be `$(kind_name(kind))`: types of size zero are not supported"
-    end
-    # The offset of the next field in the strictest layout, see the docstring of `BitsKind`
-    offset = 0
-    for i in 1:fieldcount(T)
-        F = fieldtype(T, i)
-        name = fieldname(T, i)
-        field_kind = bits_kind(F)::BitsKind
-        if field_kind isa Opaque
-            return "The field `$name` of `$T` has the type `$F`, whose `bits_kind` is `Opaque`"
-        elseif kind isa BitsLoadable && !(field_kind isa BitsLoadable)
-            return "`$T` is `BitsLoadable`, but its field `$name` has the type `$F`, which is `$(kind_name(field_kind))`"
-        end
-        if isprimitivetype(F)
-            n_bits = bit_size(F)
-            if !(n_bits ≥ 8 && ispow2(n_bits))
-                return "The field `$name` of `$T` has the type `$F`, whose bit width $n_bits is not a power of two of at least 8"
-            end
-        else
-            message = bits_type_error(F, field_kind)
-            message === nothing || return message
-        end
-        alignment = strictest_alignment(F)
-        if offset % alignment != 0
-            of_what = isprimitivetype(F) ? "its type `$F`" : "the largest primitive field of its type `$F`"
-            return "`$T` has padding on some or all platforms, so it can't be `$(kind_name(kind))`: " *
-                "its field `$name` follows $offset bytes of other fields, which is not a multiple of " *
-                "$alignment, the size of $of_what"
-        end
-        # This holds if every primitive type is aligned to at most its size
-        if offset != fieldoffset(T, i)
-            return "`$T` has padding before its field `$name`, so it can't be `$(kind_name(kind))`"
-        end
-        offset += sizeof(F)
-    end
-    alignment = strictest_alignment(T)
-    if offset % alignment != 0
-        return "`$T` has padding on some or all platforms, so it can't be `$(kind_name(kind))`: " *
-            "its fields have $offset bytes, which is not a multiple of $alignment, the size of its " *
-            "largest primitive field"
-    end
-    if offset != sizeof(T)
-        return "`$T` has padding at its end, so it can't be `$(kind_name(kind))`"
-    end
-    return nothing
-end
+kind_name(kind::BitsKind) = nameof(typeof(kind))
 
 # The alignment of the bits type T in the strictest layout that any platform could give
 # it, in which every primitive type is aligned to its size. The primitive fields of a
@@ -359,6 +302,151 @@ end
     bit_size(T::Type) = Base.bitsizeof(T)
 else
     bit_size(T::Type) = 8 * sizeof(T)
+end
+
+# Why T, whose `bits_kind` is `kind`, can't be a bits type, or `nothing` if it can.
+# See the docstring of `BitsKind` for the requirements. The reason is a tuple of the
+# parts of its message, e.g. strings and types, which `string` joins.
+# The checks of the layout of T only use Base reflection, so they are done when the
+# method is generated. The generated code only calls `bits_kind` of the fields, each with
+# a constant type. So the result is constant-folded if those `bits_kind` methods are
+# foldable, as the docstring of `bits_kind` requires, without assuming it. The message
+# is not built here, since that prints types, whose `show` may be overloaded, which
+# would prevent folding.
+@generated function bits_type_error(::Type{T}, kind::BitsKind)::Union{Nothing, Tuple} where {T}
+    return Expr(:block, bits_type_error_checks(T)..., :(return nothing))
+end
+
+# The statements of the body of `bits_type_error` for T. The generated code refers to
+# the arguments `T` and `kind`. A check that fails for T regardless of the `bits_kind`
+# of its fields becomes a `return` of the parts of its message, and ends the statements.
+function bits_type_error_checks(T::Type)::Vector{Any}
+    if isprimitivetype(T)
+        n_bits = bit_size(T)
+        n_bits % 8 == 0 && return []
+        return [
+            :(
+                return tuple(
+                    "`bits_kind(", T, ")` is `", kind_name(kind), "`, but the bit width ", $n_bits,
+                    " of `", T, "` is not a multiple of 8, so `LittleEndian` and `BigEndian` can't ",
+                    "encode it as its bits. To encode it in whole bytes, leave its `bits_kind` as ",
+                    "`Opaque`, and write a codec for each byte order"
+                )
+            ),
+        ]
+    end
+    if !(isstructtype(T) && isbitstype(T))
+        return [
+            :(
+                return tuple(
+                    "`bits_kind(", T, ")` is `", kind_name(kind), "`, but `", T,
+                    "` is neither a primitive type nor an isbits struct"
+                )
+            ),
+        ]
+    end
+    if iszero(sizeof(T))
+        return [
+            :(
+                return tuple(
+                    "`", T, "` has a size of zero bytes, so it can't be `", kind_name(kind),
+                    "`: types of size zero are not supported"
+                )
+            ),
+        ]
+    end
+    checks = []
+    # The offset of the next field in the strictest layout, see the docstring of `BitsKind`
+    offset = 0
+    for i in 1:fieldcount(T)
+        F = fieldtype(T, i)
+        name = string(fieldname(T, i))
+        field_kind = Symbol(:field_kind_, i)
+        push!(
+            checks, quote
+                $field_kind = bits_kind($F)::BitsKind
+                if $field_kind isa Opaque
+                    return tuple(
+                        "The field `", $name, "` of `", T, "` has the type `", $F,
+                        "`, whose `bits_kind` is `Opaque`"
+                    )
+                elseif kind isa BitsLoadable && !($field_kind isa BitsLoadable)
+                    return tuple(
+                        "`", T, "` is `BitsLoadable`, but its field `", $name, "` has the type `",
+                        $F, "`, which is `", kind_name($field_kind), "`"
+                    )
+                end
+            end
+        )
+        if isprimitivetype(F)
+            n_bits = bit_size(F)
+            if !(n_bits ≥ 8 && ispow2(n_bits))
+                push!(
+                    checks, :(
+                        return tuple(
+                            "The field `", $name, "` of `", T, "` has the type `", $F,
+                            "`, whose bit width ", $n_bits, " is not a power of two of at least 8"
+                        )
+                    )
+                )
+                return checks
+            end
+        else
+            push!(
+                checks, quote
+                    message = bits_type_error($F, $field_kind)
+                    message === nothing || return message
+                end
+            )
+        end
+        alignment = strictest_alignment(F)
+        if offset % alignment != 0
+            of_what = isprimitivetype(F) ? "its type `" : "the largest primitive field of its type `"
+            push!(
+                checks, :(
+                    return tuple(
+                        "`", T, "` has padding on some or all platforms, so it can't be `",
+                        kind_name(kind), "`: its field `", $name, "` follows ", $offset,
+                        " bytes of other fields, which is not a multiple of ", $alignment,
+                        ", the size of ", $of_what, $F, "`"
+                    )
+                )
+            )
+            return checks
+        end
+        # This holds if every primitive type is aligned to at most its size
+        if offset != fieldoffset(T, i)
+            push!(
+                checks, :(
+                    return tuple(
+                        "`", T, "` has padding before its field `", $name, "`, so it can't be `",
+                        kind_name(kind), "`"
+                    )
+                )
+            )
+            return checks
+        end
+        offset += sizeof(F)
+    end
+    alignment = strictest_alignment(T)
+    if offset % alignment != 0
+        push!(
+            checks, :(
+                return tuple(
+                    "`", T, "` has padding on some or all platforms, so it can't be `",
+                    kind_name(kind), "`: its fields have ", $offset, " bytes, which is not a ",
+                    "multiple of ", $alignment, ", the size of its largest primitive field"
+                )
+            )
+        )
+    elseif offset != sizeof(T)
+        push!(
+            checks, :(
+                return tuple("`", T, "` has padding at its end, so it can't be `", kind_name(kind), "`")
+            )
+        )
+    end
+    return checks
 end
 
 # The number of bytes of the encoding of a bits type. The bit width of primitive types

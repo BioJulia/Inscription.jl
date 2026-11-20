@@ -46,15 +46,23 @@ DecodeError(BitScribbling.DecodeErrorKinds.EndOfInput)
 ```
 """
 @inline function try_load(io::AbstractBufReader, ::Type{T}, enc::Encoding)::Union{T, DecodeError} where {T}
+    (x, _) = @try_return try_load_sized(io, T, enc)
+    return x
+end
+
+# Like `try_load`, but also return the number of bytes consumed.
+@inline function try_load_sized(
+        io::AbstractBufReader, ::Type{T}, enc::Encoding
+    )::Union{Tuple{T, Int}, DecodeError} where {T}
     buffer = get_buffer(io)::ImmutableMemoryView{UInt8}
     if length(buffer) < max_encoded_size(T, enc)
         (buffer, _) = @noinline buffer_decided(io, T, enc)
     end
     result = try_decode_sized(buffer, 1, T, enc)
     result isa DecodeError && return result
-    (x, n) = result
+    (_, n) = result
     @inbounds consume(io, n)
-    return x
+    return result
 end
 
 # Buffer bytes until the first T in the buffer of `io` is decided, or `io` is at EOF.
@@ -245,7 +253,7 @@ end
 
 Like [`try_store`](@ref), but throw the [`EncodeError`](@ref) instead of returning it.
 
-See also: [`encode!`](@ref), [`store_all`](@ref)
+See also: [`encode!`](@ref), [`store_every`](@ref)
 
 # Examples
 ```jldoctest

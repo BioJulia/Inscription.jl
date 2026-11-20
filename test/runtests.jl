@@ -146,6 +146,25 @@ end
     return 1
 end
 
+# An impure codec, which fails every other call. Bulk functions that throw must retry the
+# element that failed, and use it if the retry succeeds.
+struct Flaky <: Encoding end
+const FLAKY_CALLS = Ref(0)
+flaky_fails() = isodd(FLAKY_CALLS[] += 1)
+BitScribbling.codec_max_encoded_size(::Type{Int8}, ::Flaky) = 1
+BitScribbling.codec_try_encoded_size(::Int8, ::Flaky) = 1
+function BitScribbling.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{Int8}, ::Flaky)
+    isempty(mem) && return DecodeError(EndOfInput)
+    flaky_fails() && return DecodeError(InvalidData)
+    return (mem[1] % Int8, 1)
+end
+function BitScribbling.codec_try_encode!(mem::MutableMemoryView{UInt8}, x::Int8, ::Flaky)
+    isempty(mem) && return EncodeError(InsufficientSpace)
+    flaky_fails() && return EncodeError(InvalidValue)
+    mem[1] = x % UInt8
+    return 1
+end
+
 # A codec that breaks its contract, by returning byte counts out of range
 struct Liar <: Encoding end
 BitScribbling.codec_max_encoded_size(::Type{<:Union{Int8, Int16, UInt8}}, ::Liar) = 2
@@ -319,6 +338,47 @@ struct WithU256Aligned
     c::UInt128
 end
 BitScribbling.bits_kind(::Type{WithU256Aligned}) = BitsLoadable()
+
+# An even byte, with a hand-written codec for the byte orders, which rejects odd bytes
+# both ways
+struct Even
+    x::UInt8
+end
+for E in (LittleEndian, BigEndian)
+    @eval begin
+        BitScribbling.codec_max_encoded_size(::Type{Even}, ::$E) = 1
+        BitScribbling.codec_try_encoded_size(x::Even, ::$E) = iseven(x.x) ? 1 : EncodeError(InvalidValue)
+        function BitScribbling.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{Even}, ::$E)
+            isempty(mem) && return DecodeError(EndOfInput)
+            return iseven(mem[1]) ? (Even(mem[1]), 1) : DecodeError(InvalidData)
+        end
+        function BitScribbling.codec_try_encode!(mem::MutableMemoryView{UInt8}, x::Even, ::$E)
+            iseven(x.x) || return EncodeError(InvalidValue)
+            isempty(mem) && return EncodeError(InsufficientSpace)
+            mem[1] = x.x
+            return 1
+        end
+    end
+end
+
+# A struct with a tuple field
+struct WithTuple
+    t::NTuple{2, UInt16}
+    x::UInt32
+end
+BitScribbling.bits_kind(::Type{WithTuple}) = BitsLoadable()
+
+# Tuples of each kind: bits types, and tuples encoded element by element, because they
+# have padding, an element type has a hand-written codec, or is a bits type that can't be
+# a field of one
+const BITS_TUPLES = (
+    NTuple{2, UInt16}, Tuple{Header, UInt64}, Tuple{Tuple{UInt8, UInt8}, UInt16},
+    Tuple{Fruit, Bool, Small}, Tuple{Flagged, Int32}, Tuple{UInt8},
+)
+const ELEMENTWISE_TUPLES = (
+    Tuple{UInt8, UInt32}, Tuple{UInt16, UInt8}, Tuple{Bool, UInt32, S24}, Tuple{Even, UInt16},
+    Tuple{Tuple{UInt8, UInt32}, Bool}, Tuple{U144, Flagged},
+)
 if HAS_NARROW
     @eval begin
         struct WithNarrow
@@ -351,7 +411,10 @@ Base.close(::StallingReader) = nothing
 
 # Pairs of a type and an encoding, covering every kind of codec
 const CODEC_CASES = let
-    types = (BITS_TYPES..., Bool, Fruit, Small, Signs, U24, S24, U144, S144, Header, Nested, Flagged, Outer)
+    types = (
+        BITS_TYPES..., Bool, Fruit, Small, Signs, U24, S24, U144, S144, Header, Nested, Flagged, Outer,
+        Even, BITS_TUPLES..., ELEMENTWISE_TUPLES...,
+    )
     cases = Any[(T, e) for T in types for e in (LittleEndian(), BigEndian())]
     push!(cases, (Char, UTF8()), (Bool, CBool()), (Char, Latin1()), (Tuple{Char, Char}, Latin1()))
     if HAS_NARROW
@@ -377,7 +440,7 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         @test_throws MethodError store(VecWriter(), 0x01, UTF8())
         @test_throws MethodError try_load(CursorReader([0x01]), UInt8, UTF8())
         @test_throws MethodError store(VecWriter(), Ptr{UInt8}(0), LittleEndian())
-        @test_throws MethodError store(VecWriter(), (1, 2), LittleEndian())
+        @test_throws MethodError store(VecWriter(), ('a', 'b'), LittleEndian())
     end
 
     @testset "Bits kinds" begin
@@ -386,7 +449,7 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         end
         @test bits_kind(Bool) === BitsStorable()
         @test bits_kind(Fruit) === BitsStorable()
-        for T in (Char, Ptr{UInt8}, String, Tuple{Int, Int})
+        for T in (Char, Ptr{UInt8}, String, Tuple{Char, Char})
             @test bits_kind(T) === Opaque()
         end
         native(x) = reinterpret(NTuple{sizeof(x), UInt8}, x)
@@ -548,17 +611,17 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         # Bulk, and loading byte by byte
         data = vcat(be, be, be[1:(n - 1)])
         dst = MemoryView(Vector{T}(undef, 3))
-        @test decode_into!(dst, MemoryView(data), BigEndian()) == (2, 2n)
+        @test decode_all!(dst, MemoryView(data), BigEndian()) == (2, 2n)
         @test all(==(value), map(low_bits, dst[1:2]))
         out = zeros(UInt8, 2n + 1)
-        @test encode_into!(MemoryView(out), dst[1:2], BigEndian()) == (2, 2n)
+        @test encode_all!(MemoryView(out), dst[1:2], BigEndian()) == (2, 2n)
         @test out[1:2n] == data[1:2n]
         io = ChunkedReader([[b] for b in data])
-        @test load_all!(io, dst, BigEndian()) == 2
+        @test load_all!(io, dst, BigEndian()) == (2, 2n)
         @test is_err(try_load(io, T, BigEndian()), n == 1 ? EndOfInput : Truncated)
         w = VecWriter()
         @test store(w, x, LittleEndian()) == n
-        @test store_all(w, dst[1:2], LittleEndian()) == 2n
+        @test store_every(w, dst[1:2], LittleEndian()) == 2n
         @test w.vec == vcat(le, le, le)
         return nothing
     end
@@ -571,7 +634,7 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         # Invalid bits
         @test is_err(try_decode(MemoryView([0x00, 0x00, 0x80]), S24, LittleEndian()), InvalidData)
         @test is_err(try_decode(MemoryView([0x80, 0x00, 0x00]), S24, BigEndian()), InvalidData)
-        @test decode_into!(MemoryView(Vector{S24}(undef, 3)), MemoryView([0x00, 0x00, 0x01, 0x00, 0x00, 0x80]), LittleEndian()) == (1, 3)
+        @test decode_all!(MemoryView(Vector{S24}(undef, 3)), MemoryView([0x00, 0x00, 0x01, 0x00, 0x00, 0x80]), LittleEndian()) == (1, 3)
         # BitsStorable types wider than any integer
         test_odd_bits(S144, UInt8[1:17; 0x7f], reinterpret(UInt128, UInt8.(1:16))[1])
         @test is_err(try_decode(MemoryView([zeros(UInt8, 17); 0x80]), S144, LittleEndian()), InvalidData)
@@ -585,7 +648,7 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         for T in (U22, U5, U30, S12), e in (LittleEndian(), BigEndian())
             @test_throws ArgumentError max_encoded_size(T, e)
             @test_throws ArgumentError try_decode(MemoryView(zeros(UInt8, 8)), T, e)
-            @test_throws ArgumentError decode_into!(MemoryView(Vector{T}(undef, 1)), MemoryView(zeros(UInt8, 8)), e)
+            @test_throws ArgumentError decode_all!(MemoryView(Vector{T}(undef, 1)), MemoryView(zeros(UInt8, 8)), e)
             @test_throws ArgumentError try_load(CursorReader(zeros(UInt8, 8)), T, e)
         end
         x = Core.Intrinsics.trunc_int(U22, 0x00012345)
@@ -610,7 +673,7 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         @test store(w, U29(0x1fffffff), BigEndian()) == 4
         @test w.vec == [0x1f, 0xff, 0xff, 0xff]
         dst = Vector{U29}(undef, 3)
-        @test decode_into!(MemoryView(dst), MemoryView([0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x07, 0xff]), BigEndian()) == (2, 8)
+        @test decode_all!(MemoryView(dst), MemoryView([0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x07, 0xff]), BigEndian()) == (2, 8)
         @test UInt32.(dst[1:2]) == [5, 7]
     end
 
@@ -745,7 +808,7 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         for max_fill in 1:3
             io = BoundedReader("aé€\xe2\x82!", 3; max_fill)
             dst = Vector{Char}(undef, 10)
-            @test load_all!(io, MemoryView(dst), UTF8()) == 5
+            @test load_all!(io, MemoryView(dst), UTF8()) == (5, ncodeunits("aé€\xe2\x82!"))
             @test dst[1:5] == collect("aé€\xe2\x82!")
         end
 
@@ -773,12 +836,13 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         # The same for loading into memory
         io = StallingReader([[0x61, 0xc3], [0xa9]])
         dst = Vector{Char}(undef, 5)
-        @test load_into!(io, MemoryView(dst), UTF8()) == 1 # 'é' isn't decided yet
+        @test load_into!(io, MemoryView(dst), UTF8()) == (1, 1) # 'é' isn't decided yet
         @test dst[1] == 'a'
-        @test load_into!(io, MemoryView(dst), UTF8()) == 1
+        @test load_into!(io, MemoryView(dst), UTF8()) == (1, 2)
         @test dst[1] == 'é'
         io = StallingReader([[0x61, 0x62, 0xe2], [0x82, 0xac]])
-        @test load!(io, MemoryView(dst)[1:3], UTF8()) == ['a', 'b', '€']
+        @test load_every!(io, MemoryView(dst)[1:3], UTF8()) == 5
+        @test dst[1:3] == ['a', 'b', '€']
 
         # Fixed-size values, and codecs without `codec_bytes_needed`, wait for
         # `max_encoded_size` bytes
@@ -936,7 +1000,7 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         @test encode_pair!(MemoryView(zeros(UInt8, 2)), 0x01, 0x0203) === EncodeError(InsufficientSpace)
     end
 
-    @testset "decode_into! / encode_into!" begin
+    @testset "decode_all! / encode_all!" begin
         for T in (BITS_TYPES..., Bool, Fruit), e in (LittleEndian(), BigEndian())
             values = if T === Bool
                 rand(Bool, 37)
@@ -947,50 +1011,128 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
             end
             bytes = zeros(UInt8, sizeof(T) * 37 + 5)
             # Misaligned
-            @test encode_into!(MemoryView(bytes)[2:end], MemoryView(values), e) == (37, 37 * sizeof(T))
+            @test encode_all!(MemoryView(bytes)[2:end], MemoryView(values), e) == (37, 37 * sizeof(T))
             for (i, x) in enumerate(values)
                 r = try_decode(MemoryView(bytes), 2 + (i - 1) * sizeof(T), T, e)
                 @test isequal(r, x)
             end
             dst = Vector{T}(undef, 40)
             src = MemoryView(bytes)[2:(1 + 37 * sizeof(T))]
-            @test decode_into!(MemoryView(dst), src, e) == (37, 37 * sizeof(T))
+            @test decode_all!(MemoryView(dst), src, e) == (37, 37 * sizeof(T))
             @test isequal(dst[1:37], values)
             # Limited by dst
             dst = Vector{T}(undef, 10)
-            @test decode_into!(MemoryView(dst), MemoryView(bytes)[2:end], e) == (10, 10 * sizeof(T))
+            @test decode_all!(MemoryView(dst), MemoryView(bytes)[2:end], e) == (10, 10 * sizeof(T))
             @test isequal(dst, values[1:10])
             # Limited by dst bytes
             out = zeros(UInt8, 4 * sizeof(T) - 1)
-            @test encode_into!(MemoryView(out), MemoryView(values), e) == (3, 3 * sizeof(T))
-            @test decode_into!(MemoryView(Vector{T}(undef, 3)), MemoryView(out), e) == (3, 3 * sizeof(T))
+            @test encode_all!(MemoryView(out), MemoryView(values), e) == (3, 3 * sizeof(T))
+            @test decode_all!(MemoryView(Vector{T}(undef, 3)), MemoryView(out), e) == (3, 3 * sizeof(T))
             # Empty
-            @test decode_into!(MemoryView(T[]), MemoryView(bytes), e) == (0, 0)
-            @test encode_into!(MemoryView(UInt8[]), MemoryView(values), e) == (0, 0)
-            @test encode_into!(MemoryView(bytes), MemoryView(T[]), e) == (0, 0)
+            @test decode_all!(MemoryView(T[]), MemoryView(bytes), e) == (0, 0)
+            @test encode_all!(MemoryView(UInt8[]), MemoryView(values), e) == (0, 0)
+            @test encode_all!(MemoryView(bytes), MemoryView(T[]), e) == (0, 0)
         end
 
         # Stops at invalid data
         dst = zeros(Bool, 5)
-        @test decode_into!(MemoryView(dst), MemoryView([0x01, 0x00, 0x02, 0x01]), LittleEndian()) == (2, 2)
+        @test decode_all!(MemoryView(dst), MemoryView([0x01, 0x00, 0x02, 0x01]), LittleEndian()) == (2, 2)
         @test dst[1:2] == [true, false]
 
         # Memory that `MemoryView` can view is accepted too, see "Memory-like arguments"
-        @test decode_into!(zeros(UInt8, 2), MemoryView([0x01]), LittleEndian()) == (1, 1)
-        @test decode_into!(MemoryView(zeros(UInt8, 2)), [0x01], LittleEndian()) == (1, 1)
-        @test encode_into!(MemoryView(zeros(UInt8, 2)), [0x01], LittleEndian()) == (1, 1)
-        @test load_into!(CursorReader([0x01]), zeros(UInt8, 1), LittleEndian()) == 1
-        @test store_all(VecWriter(), [0x01], LittleEndian()) == 1
+        @test decode_all!(zeros(UInt8, 2), MemoryView([0x01]), LittleEndian()) == (1, 1)
+        @test decode_all!(MemoryView(zeros(UInt8, 2)), [0x01], LittleEndian()) == (1, 1)
+        @test encode_all!(MemoryView(zeros(UInt8, 2)), [0x01], LittleEndian()) == (1, 1)
+        @test load_into!(CursorReader([0x01]), zeros(UInt8, 1), LittleEndian()) == (1, 1)
+        @test store_every(VecWriter(), [0x01], LittleEndian()) == 1
+        @test decode_every!(zeros(UInt8, 1), [0x01], LittleEndian()) == 1
+        @test encode_every!(zeros(UInt8, 1), [0x01], LittleEndian()) == 1
+        @test store_into(VecWriter(), [0x01], LittleEndian()) == (1, 1)
+        @test store_all(VecWriter(), [0x01], LittleEndian()) == (1, 1)
 
         # Variable-length encodings
         s = "aé€😀\xe2\x82"
         dst = Vector{Char}(undef, 10)
-        @test decode_into!(MemoryView(dst), MemoryView(s), UTF8()) == (length(s), ncodeunits(s))
+        @test decode_all!(MemoryView(dst), MemoryView(s), UTF8()) == (length(s), ncodeunits(s))
         @test dst[1:length(s)] == collect(s)
         out = zeros(UInt8, 8)
-        @test encode_into!(MemoryView(out), MemoryView(collect(s)), UTF8()) == (3, 6) # no room for the 4 bytes of 😀
+        @test encode_all!(MemoryView(out), MemoryView(collect(s)), UTF8()) == (3, 6) # no room for the 4 bytes of 😀
         @test out[1:6] == codeunits("aé€")
-        @test encode_into!(MemoryView(zeros(UInt8, 20)), MemoryView(collect(s)), UTF8()) == (length(s), ncodeunits(s))
+        @test encode_all!(MemoryView(zeros(UInt8, 20)), MemoryView(collect(s)), UTF8()) == (length(s), ncodeunits(s))
+    end
+
+    @testset "decode_every! / encode_every!" begin
+        for T in (BITS_TYPES..., Bool, Fruit), e in (LittleEndian(), BigEndian())
+            values = if T === Bool
+                rand(Bool, 37)
+            elseif T === Fruit
+                rand(instances(Fruit), 37)
+            else
+                rand(T, 37)
+            end
+            bytes = zeros(UInt8, sizeof(T) * 37 + 5)
+            # Misaligned, with room to spare
+            @test encode_every!(MemoryView(bytes)[2:end], MemoryView(values), e) == 37 * sizeof(T)
+            dst = Vector{T}(undef, 37)
+            # Trailing bytes are ignored
+            @test decode_every!(MemoryView(dst), MemoryView(bytes)[2:end], e) == 37 * sizeof(T)
+            @test isequal(dst, values)
+            # Empty
+            @test decode_every!(MemoryView(T[]), MemoryView(UInt8[]), e) == 0
+            @test encode_every!(MemoryView(UInt8[]), MemoryView(T[]), e) == 0
+            # Too few bytes to decode, or room to encode
+            dst = Vector{T}(undef, 4)
+            src = MemoryView(bytes)[2:(1 + 3 * sizeof(T))]
+            @test_throws DecodeError(EndOfInput) decode_every!(MemoryView(dst), src, e)
+            @test isequal(dst[1:3], values[1:3])
+            if sizeof(T) > 1
+                src = MemoryView(bytes)[2:(3 * sizeof(T))]
+                @test_throws DecodeError(Truncated) decode_every!(MemoryView(dst), src, e)
+            end
+            out = zeros(UInt8, 4 * sizeof(T) - 1)
+            @test_throws LightBoundsError encode_every!(MemoryView(out), MemoryView(values[1:4]), e)
+            @test out[1:(3 * sizeof(T))] == bytes[2:(1 + 3 * sizeof(T))]
+        end
+
+        # Invalid data
+        dst = zeros(Bool, 3)
+        @test_throws DecodeError(InvalidData) decode_every!(MemoryView(dst), MemoryView([0x01, 0x00, 0x02, 0x01]), LittleEndian())
+        @test dst[1:2] == [true, false]
+
+        # Variable-length encodings
+        s = "aé€😀\xe2\x82"
+        dst = Vector{Char}(undef, length(s))
+        @test decode_every!(MemoryView(dst), MemoryView(s), UTF8()) == ncodeunits(s)
+        @test dst == collect(s)
+        out = zeros(UInt8, ncodeunits(s) + 2)
+        @test encode_every!(MemoryView(out), MemoryView(collect(s)), UTF8()) == ncodeunits(s)
+        @test out[1:ncodeunits(s)] == codeunits(s)
+        # Ends between two characters
+        @test_throws DecodeError(EndOfInput) decode_every!(MemoryView(Vector{Char}(undef, 4)), MemoryView(codeunits(s)[1:6]), UTF8())
+        # No room for the 4 bytes of 😀. The error reports the index where it starts.
+        err = try
+            encode_every!(MemoryView(zeros(UInt8, 8)), MemoryView(collect(s)), UTF8())
+        catch e
+            e
+        end
+        @test err isa LightBoundsError
+        @test occursin("collection[7:9]", sprint(showerror, err))
+
+        # An impure codec, which fails every other call: the elements it decodes or
+        # encodes when retried are used
+        FLAKY_CALLS[] = 0
+        dst = zeros(Int8, 5)
+        @test decode_every!(MemoryView(dst), MemoryView(UInt8[1, 2, 3, 4, 5]), Flaky()) == 5
+        @test dst == 1:5
+        out = zeros(UInt8, 5)
+        @test encode_every!(MemoryView(out), MemoryView(dst), Flaky()) == 5
+        @test out == 1:5
+        dst = zeros(Int8, 5)
+        @test load_every!(CursorReader(UInt8[1, 2, 3, 4, 5]), MemoryView(dst), Flaky()) == 5
+        @test dst == 1:5
+        io = VecWriter()
+        @test store_every(io, MemoryView(dst), Flaky()) == 5
+        @test io.vec == 1:5
     end
 
     @testset "load_into! / load_all!" begin
@@ -1001,7 +1143,7 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
 
             io = BoundedReader(data, 16; max_fill)
             dst = Vector{T}(undef, 50)
-            @test load_all!(io, MemoryView(dst), LittleEndian()) == n
+            @test load_all!(io, MemoryView(dst), LittleEndian()) == (n, n * sizeof(T))
             @test dst[1:n] == expected
             r = try_load(io, T, LittleEndian())
             @test is_err(r, (41 % sizeof(T) == 0) ? EndOfInput : Truncated)
@@ -1010,23 +1152,24 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
             dst = Vector{T}(undef, 50)
             total = 0
             while true
-                k = load_into!(io, MemoryView(dst)[(total + 1):end], LittleEndian())
+                (k, b) = load_into!(io, MemoryView(dst)[(total + 1):end], LittleEndian())
                 iszero(k) && break
                 @test k ≥ 1
+                @test b == k * sizeof(T)
                 total += k
             end
             @test total == n
             @test dst[1:n] == expected
         end
 
-        @test load_into!(CursorReader([0x01]), MemoryView(UInt8[]), LittleEndian()) == 0
-        @test load_all!(CursorReader([0x01]), MemoryView(UInt8[]), LittleEndian()) == 0
-        @test load_into!(CursorReader(UInt8[]), MemoryView(zeros(UInt8, 3)), LittleEndian()) == 0
+        @test load_into!(CursorReader([0x01]), MemoryView(UInt8[]), LittleEndian()) == (0, 0)
+        @test load_all!(CursorReader([0x01]), MemoryView(UInt8[]), LittleEndian()) == (0, 0)
+        @test load_into!(CursorReader(UInt8[]), MemoryView(zeros(UInt8, 3)), LittleEndian()) == (0, 0)
 
         # Stops at an invalid element, consuming nothing of it
         io = CursorReader([0x01, 0x00, 0x01, 0x05, 0x01])
         dst = zeros(Bool, 5)
-        @test load_all!(io, MemoryView(dst), BigEndian()) == 3
+        @test load_all!(io, MemoryView(dst), BigEndian()) == (3, 3)
         @test dst[1:3] == [true, false, true]
         @test is_err(try_load(io, Bool, BigEndian()), InvalidData)
         @test length(get_buffer(io)) == 2
@@ -1036,27 +1179,27 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         for max_fill in 1:5, cap in 4:6
             io = BoundedReader(s, cap; max_fill)
             dst = Vector{Char}(undef, 30)
-            @test load_all!(io, MemoryView(dst), UTF8()) == length(s)
+            @test load_all!(io, MemoryView(dst), UTF8()) == (length(s), ncodeunits(s))
             @test dst[1:length(s)] == collect(s)
             @test is_err(try_load(io, Char, UTF8()), EndOfInput)
         end
         io = ChunkedReader([[0x61, 0xe2], [0x82], [0xac, 0x62, 0xe2]])
         dst = Vector{Char}(undef, 10)
-        @test load_all!(io, MemoryView(dst), UTF8()) == 4
+        @test load_all!(io, MemoryView(dst), UTF8()) == (4, 6)
         @test dst[1:4] == ['a', '€', 'b', '\xe2']
 
         # Too-small capacity
         @test_throws IOError load_into!(BoundedReader(zeros(UInt8, 8), 2), MemoryView(zeros(UInt32, 2)), LittleEndian())
     end
 
-    @testset "load!" begin
+    @testset "load_every!" begin
         data = collect(UInt8, 1:40)
         for max_fill in (1, 3, 8, 100), T in (UInt8, UInt16, UInt32, UInt64)
             n = div(40, sizeof(T))
             expected = [ltoh(x) for x in reinterpret(T, data)]
             io = BoundedReader(data, 16; max_fill)
             dst = MemoryView(Vector{T}(undef, n))
-            @test load!(io, dst, LittleEndian()) === dst
+            @test load_every!(io, dst, LittleEndian()) == 40
             @test collect(dst) == expected
             @test is_err(try_load(io, UInt8, LittleEndian()), EndOfInput)
         end
@@ -1065,65 +1208,105 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         for max_fill in 1:5, cap in 4:6
             io = BoundedReader(s, cap; max_fill)
             dst = Vector{Char}(undef, length(s))
-            load!(io, MemoryView(dst), UTF8())
+            @test load_every!(io, MemoryView(dst), UTF8()) == ncodeunits(s)
             @test dst == collect(s)
         end
         # An empty `dst` loads nothing
         io = CursorReader([0x01])
-        @test isempty(load!(io, MemoryView(UInt8[]), LittleEndian()))
+        @test load_every!(io, MemoryView(UInt8[]), LittleEndian()) == 0
         @test length(get_buffer(io)) == 1
 
         # No bytes at all
-        @test_throws DecodeError(EndOfInput) load!(CursorReader(UInt8[]), MemoryView(zeros(UInt16, 2)), LittleEndian())
+        @test_throws DecodeError(EndOfInput) load_every!(CursorReader(UInt8[]), MemoryView(zeros(UInt16, 2)), LittleEndian())
         # Ends between two elements, after some were loaded
         io = CursorReader([0x01, 0x00])
         dst = zeros(UInt16, 2)
-        @test_throws DecodeError(EndOfInput) load!(io, MemoryView(dst), LittleEndian())
+        @test_throws DecodeError(EndOfInput) load_every!(io, MemoryView(dst), LittleEndian())
         @test dst[1] == 0x0001
         @test isempty(get_buffer(io))
         # Ends partway through an element, which is not consumed
         io = CursorReader([0x01, 0x00, 0x02])
-        @test_throws DecodeError(Truncated) load!(io, MemoryView(zeros(UInt16, 2)), LittleEndian())
+        @test_throws DecodeError(Truncated) load_every!(io, MemoryView(zeros(UInt16, 2)), LittleEndian())
         @test length(get_buffer(io)) == 1
         # An invalid element, which is not consumed
         io = CursorReader([0x01, 0x00, 0x05, 0x01])
         dst = zeros(Bool, 4)
-        @test_throws DecodeError(InvalidData) load!(io, MemoryView(dst), BigEndian())
+        @test_throws DecodeError(InvalidData) load_every!(io, MemoryView(dst), BigEndian())
         @test dst[1:2] == [true, false]
         @test length(get_buffer(io)) == 2
         # Too-small capacity
-        @test_throws IOError load!(BoundedReader(zeros(UInt8, 8), 2), MemoryView(zeros(UInt32, 2)), LittleEndian())
+        @test_throws IOError load_every!(BoundedReader(zeros(UInt8, 8), 2), MemoryView(zeros(UInt32, 2)), LittleEndian())
         # The convenience modules
         dst = zeros(UInt16, 2)
-        Big.load!(CursorReader([0x00, 0x01, 0x00, 0x02]), MemoryView(dst))
+        @test Big.load_every!(CursorReader([0x00, 0x01, 0x00, 0x02]), MemoryView(dst)) == 4
         @test dst == [0x0001, 0x0002]
     end
 
-    @testset "store_all" begin
+    @testset "store_into / store_all" begin
         values = rand(UInt32, 33)
+        expected = reduce(vcat, bytes_be.(values))
         for cap in (4, 5, 7, 100)
             sink = UInt8[]
             io = BoundedWriter(sink, cap)
-            @test store_all(io, MemoryView(values), BigEndian()) == 4 * 33
+            @test store_all(io, MemoryView(values), BigEndian()) == (33, 4 * 33)
             flush(io)
-            @test sink == reduce(vcat, bytes_be.(values))
+            @test sink == expected
+            # `store_into` stores as many elements as fit in one buffer, at least one
+            sink = UInt8[]
+            io = BoundedWriter(sink, cap)
+            rest = MemoryView(values)
+            while !isempty(rest)
+                (n, b) = store_into(io, rest, BigEndian())
+                @test 1 ≤ n ≤ max(1, div(cap, 4))
+                @test b == 4n
+                rest = rest[(n + 1):end]
+            end
+            flush(io)
+            @test sink == expected
         end
-        sink = UInt8[]
-        io = BoundedWriter(sink, 3)
+        # Empty `src` stores nothing, and doesn't need a buffer
+        io = BoundedWriter(UInt8[], 3)
+        @test store_into(io, MemoryView(UInt32[]), BigEndian()) == (0, 0)
+        @test store_all(io, MemoryView(UInt32[]), BigEndian()) == (0, 0)
+        # Too-small capacity
+        @test_throws IOError store_into(io, MemoryView(values), BigEndian())
         @test_throws IOError store_all(io, MemoryView(values), BigEndian())
-        @test store_all(io, MemoryView(UInt32[]), BigEndian()) == 0
 
         s = "aé€😀\xe2\x82 x\xffyz€"
         for cap in 4:7
             sink = UInt8[]
             io = BoundedWriter(sink, cap)
-            @test store_all(io, MemoryView(collect(s)), UTF8()) == ncodeunits(s)
+            @test store_all(io, MemoryView(collect(s)), UTF8()) == (length(s), ncodeunits(s))
+            flush(io)
+            @test String(sink) == s
+        end
+    end
+
+    @testset "store_every" begin
+        values = rand(UInt32, 33)
+        for cap in (4, 5, 7, 100)
+            sink = UInt8[]
+            io = BoundedWriter(sink, cap)
+            @test store_every(io, MemoryView(values), BigEndian()) == 4 * 33
+            flush(io)
+            @test sink == reduce(vcat, bytes_be.(values))
+        end
+        sink = UInt8[]
+        io = BoundedWriter(sink, 3)
+        @test_throws IOError store_every(io, MemoryView(values), BigEndian())
+        @test store_every(io, MemoryView(UInt32[]), BigEndian()) == 0
+
+        s = "aé€😀\xe2\x82 x\xffyz€"
+        for cap in 4:7
+            sink = UInt8[]
+            io = BoundedWriter(sink, cap)
+            @test store_every(io, MemoryView(collect(s)), UTF8()) == ncodeunits(s)
             flush(io)
             @test String(sink) == s
         end
         io = VecWriter()
-        @test store_all(io, MemoryView([true, false]), LittleEndian()) == 2
-        @test store_all(io, MemoryView(Fruit[banana]), LittleEndian()) == 2
+        @test store_every(io, MemoryView([true, false]), LittleEndian()) == 2
+        @test store_every(io, MemoryView(Fruit[banana]), LittleEndian()) == 2
         @test io.vec == [0x01, 0x00, 0x03, 0x02]
     end
 
@@ -1260,7 +1443,7 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         for (src, e) in ((['a', '€', 'é', '😀'], UTF8()), ([true, false, true], CBool()))
             for len in 0:12
                 buf = fill(0xaa, len)
-                (_, n_bytes) = encode_into!(MemoryView(buf), MemoryView(src), e)
+                (_, n_bytes) = encode_all!(MemoryView(buf), MemoryView(src), e)
                 @test all(==(0xaa), buf[(n_bytes + 1):end])
             end
         end
@@ -1363,17 +1546,32 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         # Bulk functions stop at the value
         src = ['a', 'b', 'λ', 'c']
         buf = fill(0xaa, 6)
-        @test encode_into!(MemoryView(buf), MemoryView(src), Latin1()) == (2, 2)
+        @test encode_all!(MemoryView(buf), MemoryView(src), Latin1()) == (2, 2)
         @test buf[1:2] == [0x61, 0x62]
         @test try_encode!(MemoryView(buf), 3, src[3], Latin1()) === EncodeError(InvalidValue)
         for cap in (1, 2, 3, 100)
             sink = UInt8[]
             io = BoundedWriter(sink, cap)
-            @test_throws EncodeError(InvalidValue) store_all(io, MemoryView(src), Latin1())
+            @test_throws EncodeError(InvalidValue) store_every(io, MemoryView(src), Latin1())
             flush(io)
             @test sink == [0x61, 0x62]
         end
-        @test_throws EncodeError(InvalidValue) store_all(VecWriter(), MemoryView(['λ']), Latin1())
+        @test_throws EncodeError(InvalidValue) store_every(VecWriter(), MemoryView(['λ']), Latin1())
+        for cap in (1, 2, 3, 100)
+            sink = UInt8[]
+            io = BoundedWriter(sink, cap)
+            @test store_all(io, MemoryView(src), Latin1()) == (2, 2)
+            @test store_all(io, MemoryView(src), Latin1()) == (2, 2)
+            flush(io)
+            @test sink == [0x61, 0x62, 0x61, 0x62]
+        end
+        io = VecWriter()
+        @test store_into(io, MemoryView(['λ']), Latin1()) == (0, 0)
+        @test store_all(io, MemoryView(['λ']), Latin1()) == (0, 0)
+        @test isempty(io.vec)
+        buf = fill(0xaa, 6)
+        @test_throws EncodeError(InvalidValue) encode_every!(MemoryView(buf), MemoryView(src), Latin1())
+        @test buf[1:2] == [0x61, 0x62]
 
         # A codec may write before it finds out that the value is invalid, but not beyond
         # `max_encoded_size` bytes
@@ -1433,18 +1631,18 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         for e in (LittleEndian(), BigEndian())
             values = [Nested(Header(rand(UInt32), rand(UInt16), rand(UInt8), rand(UInt8)), rand(Float32), rand(Int16), rand(Int16)) for _ in 1:20]
             bytes = zeros(UInt8, 16 * 20 + 3)
-            @test encode_into!(MemoryView(bytes), MemoryView(values), e) == (20, 320)
+            @test encode_all!(MemoryView(bytes), MemoryView(values), e) == (20, 320)
             for (i, x) in enumerate(values)
                 @test decode(MemoryView(bytes), 16 * (i - 1) + 1, Nested, e) === x
             end
             dst = Vector{Nested}(undef, 25)
-            @test decode_into!(MemoryView(dst), MemoryView(bytes), e) == (20, 320)
+            @test decode_all!(MemoryView(dst), MemoryView(bytes), e) == (20, 320)
             @test dst[1:20] == values
             dst = Vector{Nested}(undef, 25)
-            @test load_all!(ChunkedReader([bytes[i:min(i + 6, end)] for i in 1:7:length(bytes)]), MemoryView(dst), e) == 20
+            @test load_all!(ChunkedReader([bytes[i:min(i + 6, end)] for i in 1:7:length(bytes)]), MemoryView(dst), e) == (20, 320)
             @test dst[1:20] == values
             w = VecWriter()
-            @test store_all(w, MemoryView(values), e) == 320
+            @test store_every(w, MemoryView(values), e) == 320
             @test w.vec == bytes[1:320]
         end
 
@@ -1463,14 +1661,14 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         @test decode(MemoryView([valid; valid]), Outer, BigEndian()) === Outer(Flagged(true, 0x00, banana), Flagged(true, 0x00, banana))
         @test is_err(try_decode(MemoryView([valid; breaks_invariant]), Outer, BigEndian()), InvalidData)
         @test is_err(try_decode(MemoryView([valid; [0x03, 0x00, 0x02, 0x03]]), Outer, BigEndian()), InvalidData)
-        @test decode_into!(MemoryView(Vector{Outer}(undef, 3)), MemoryView([valid; valid; valid; breaks_invariant]), BigEndian()) == (1, 8)
+        @test decode_all!(MemoryView(Vector{Outer}(undef, 3)), MemoryView([valid; valid; valid; breaks_invariant]), BigEndian()) == (1, 8)
 
         # Types of size zero are not supported, also by the bulk functions, which
         # divide by the size
         for e in (LittleEndian(), BigEndian())
             @test_throws ArgumentError encode!(MemoryView(UInt8[]), Empty(), e)
-            @test_throws ArgumentError encode_into!(MemoryView(UInt8[0x00]), MemoryView([Empty()]), e)
-            @test_throws ArgumentError store_all(VecWriter(), MemoryView([Empty()]), e)
+            @test_throws ArgumentError encode_all!(MemoryView(UInt8[0x00]), MemoryView([Empty()]), e)
+            @test_throws ArgumentError store_every(VecWriter(), MemoryView([Empty()]), e)
             @test_throws ArgumentError load_into!(CursorReader([0x00]), MemoryView([Empty()]), e)
         end
 
@@ -1482,7 +1680,7 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
             )
             @test_throws ArgumentError max_encoded_size(T, LittleEndian())
             @test_throws ArgumentError try_decode(MemoryView(zeros(UInt8, 16)), T, BigEndian())
-            @test_throws ArgumentError decode_into!(MemoryView(Vector{T}(undef, 1)), MemoryView(zeros(UInt8, 16)), BigEndian())
+            @test_throws ArgumentError decode_all!(MemoryView(Vector{T}(undef, 1)), MemoryView(zeros(UInt8, 16)), BigEndian())
         end
         @test_throws ArgumentError encode!(MemoryView(zeros(UInt8, 8)), Padded(0x01, 0x02), LittleEndian())
         message(T) =
@@ -1516,6 +1714,138 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         end
         # Not opted in: no codec
         @test_throws MethodError max_encoded_size(Plain, LittleEndian())
+    end
+
+    @testset "Tuples" begin
+        s24 = decode([0x01, 0x02, 0x03], S24, BigEndian())
+        u144 = decode(collect(0x01:0x12), U144, BigEndian())
+        values = (
+            (0x0102, 0x0304),
+            (Header(0x01020304, 0x0506, 0x07, 0x08), 0x090a0b0c0d0e0f10),
+            ((0x01, 0x02), 0x0304),
+            (banana, true, wee),
+            (Flagged(true, 0x05, cherry), Int32(-2)),
+            (0x2a,),
+            (0x01, 0x02030405),
+            (0x0102, 0x03),
+            (true, 0x01020304, s24),
+            (Even(0x04), 0x0102),
+            ((0x01, 0x02030405), false),
+            (u144, Flagged(false, 0x07, apple)),
+        )
+        @test Set(map(typeof, values)) == Set((BITS_TUPLES..., ELEMENTWISE_TUPLES...))
+
+        # Bits types if the requirements of bits structs hold, else encoded element by element
+        @test all(T -> !(bits_kind(T) isa Opaque), BITS_TUPLES)
+        @test all(T -> bits_kind(T) isa Opaque, ELEMENTWISE_TUPLES)
+        @test bits_kind(NTuple{2, UInt16}) === BitsLoadable()
+        @test bits_kind(Tuple{Fruit, Bool, Small}) === BitsStorable()
+        @test bits_kind(Tuple{Tuple{Small, Small}, Fruit}) === BitsStorable()
+        # `Tuple{Fruit, Bool}` has padding at its end, so a tuple containing it can't be a bits type
+        @test bits_kind(Tuple{Tuple{Fruit, Bool}, Small, Small}) === Opaque()
+        @test bits_kind(Tuple{Char, Char}) === Opaque()
+        @test bits_kind(Tuple{Integer}) === Opaque()
+        # Structs may have tuple fields
+        w = WithTuple((0x0102, 0x0304), 0x05060708)
+        bytes = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
+        @test encode!(zeros(UInt8, 8), w, BigEndian()) == 8
+        @test decode(bytes, WithTuple, BigEndian()) === w
+        @test decode(bytes, WithTuple, LittleEndian()) === WithTuple((0x0201, 0x0403), 0x08070605)
+
+        encoding(x, e) = (buf = zeros(UInt8, max_encoded_size(typeof(x), e)); buf[1:encode!(buf, x, e)])
+        for x in values, e in (LittleEndian(), BigEndian())
+            T = typeof(x)
+            # The encodings of the elements, one after another
+            bytes = encoding(x, e)
+            @test bytes == reduce(vcat, (encoding(y, e) for y in x))
+            @test max_encoded_size(T, e) == sum(y -> max_encoded_size(typeof(y), e), x) == length(bytes)
+            @test try_encoded_size(x, e) == length(bytes)
+            @test try_decode_n(MemoryView([bytes; 0xff]), T, e) === (x, length(bytes))
+            @test load(CursorReader(bytes), T, e) === x
+            # Loading waits for the bytes it needs
+            @test load(ChunkedReader([[b] for b in bytes]), T, e) === x
+            @test load_exact(CursorReader(bytes), length(bytes), T, e) === x
+            w = VecWriter()
+            @test store(w, x, e) == length(bytes)
+            @test w.vec == bytes
+            # Too few bytes
+            @test is_err(try_decode(UInt8[], T, e), EndOfInput)
+            for len in 1:(length(bytes) - 1)
+                @test is_err(try_decode(bytes[1:len], T, e), Truncated)
+                buf = fill(0xaa, len)
+                @test try_encode!(buf, x, e) === EncodeError(InsufficientSpace)
+                @test all(==(0xaa), buf)
+            end
+            # Bulk
+            xs = fill(x, 5)
+            all_bytes = repeat(bytes, 5)
+            buf = zeros(UInt8, length(all_bytes) + 1)
+            @test encode_all!(buf, xs, e) == (5, length(all_bytes))
+            @test buf[1:(end - 1)] == all_bytes
+            # Limited by the input
+            dst = Vector{T}(undef, 6)
+            @test decode_all!(dst, MemoryView(buf)[1:(end - 1)], e) == (5, length(all_bytes))
+            @test dst[1:5] == xs
+            chunks = [all_bytes[i:min(i + 2, end)] for i in 1:3:length(all_bytes)]
+            dst = Vector{T}(undef, 5)
+            @test load_all!(ChunkedReader(chunks), MemoryView(dst), e) == (5, length(all_bytes))
+            @test dst == xs
+            w = VecWriter()
+            @test store_every(w, MemoryView(xs), e) == length(all_bytes)
+            @test w.vec == all_bytes
+        end
+
+        # Invalid elements
+        for e in (LittleEndian(), BigEndian())
+            @test is_err(try_decode([0x01, 0x00, 0x00], Tuple{Even, UInt16}, e), InvalidData)
+            @test is_err(try_decode([0x02, 0x00, 0x00, 0x00, 0x00], Tuple{Bool, UInt32}, e), InvalidData)
+            @test is_err(try_decode([0x01, 0x00, 0x00, 0x00, 0x02], Tuple{UInt32, Bool}, e), InvalidData)
+            # A later invalid element is only found after the earlier ones are decoded
+            @test is_err(try_decode([0x01], Tuple{UInt32, Bool}, e), Truncated)
+            @test try_encoded_size((0x01, Even(0x03)), e) == EncodeError(InvalidValue)
+            @test try_encode!(zeros(UInt8, 2), (0x01, Even(0x03)), e) == EncodeError(InvalidValue)
+            @test_throws EncodeError(InvalidValue) store(VecWriter(), (0x01, Even(0x03)), e)
+            # Either error kind may be returned if both apply
+            @test try_encode!(zeros(UInt8, 1), (0x01, Even(0x03)), e) isa EncodeError
+        end
+
+        # An invalid element decides the result, so loading doesn't wait for the rest
+        @test_throws DecodeError(InvalidData) load(StallingReader([[0x02]]), Tuple{Bool, UInt32}, BigEndian())
+        @test_throws DecodeError(InvalidData) load(StallingReader([[0x01, 0x03]]), Tuple{UInt8, Even, UInt64}, BigEndian())
+        @test load(StallingReader([[0x01], [0x02, 0x03], [0x04, 0x05]]), Tuple{Bool, UInt32}, BigEndian()) === (true, 0x02030405)
+        @test_throws ErrorException load(StallingReader([[0x01, 0x02]]), Tuple{Bool, UInt32}, BigEndian())
+
+        # Tuples that can't be encoded
+        for e in (LittleEndian(), BigEndian())
+            @test_throws ArgumentError max_encoded_size(Tuple{}, e)
+            @test_throws ArgumentError try_decode(UInt8[], Tuple{}, e)
+            @test_throws ArgumentError encode!(UInt8[], (), e)
+            @test_throws ArgumentError max_encoded_size(Tuple{Integer}, e)
+            @test_throws ArgumentError try_decode(zeros(UInt8, 8), Tuple{Integer}, e)
+            @test_throws MethodError max_encoded_size(Tuple{Char}, e)
+        end
+        # Only the byte orders encode tuples
+        @test_throws MethodError max_encoded_size(Tuple{Char, Char}, UTF8())
+
+        # Encoding element by element doesn't allocate
+        function sum_tuples(io)
+            s = UInt64(0)
+            while true
+                x = try_load(io, Tuple{UInt8, UInt32, Bool}, BigEndian())
+                x isa DecodeError && break
+                s += x[1] + x[2] + x[3]
+            end
+            return s
+        end
+        data = repeat([0x01, 0x00, 0x00, 0x00, 0x02, 0x01], 100)
+        @test sum_tuples(CursorReader(data)) == 400
+        io = CursorReader(data)
+        @test (@allocated sum_tuples(io)) == 0
+        w = VecWriter()
+        sizehint!(w.vec, 1000)
+        store_tuple(w) = store(w, (0x01, 0x02030405, true), LittleEndian())
+        store_tuple(w)
+        @test (@allocated store_tuple(w)) == 0
     end
 
     @testset "@inbounds" begin
@@ -1599,17 +1929,21 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
             @test_throws ErrorException try_decode(mem, T, Liar())
             @test_throws ErrorException try_decode_next(mem, 1, T, Liar())
             @test_throws ErrorException decode_inbounds(mem, T, Liar())
-            @test_throws ErrorException decode_into!(MemoryView(zeros(T, 3)), mem, Liar())
+            @test_throws ErrorException decode_all!(MemoryView(zeros(T, 3)), mem, Liar())
             @test_throws ErrorException try_encode!(mem, zero(T), Liar())
             @test_throws ErrorException encode_inbounds!(mem, zero(T), Liar())
-            @test_throws ErrorException encode_into!(mem, MemoryView(zeros(T, 3)), Liar())
+            @test_throws ErrorException encode_all!(mem, MemoryView(zeros(T, 3)), Liar())
+            @test_throws ErrorException decode_every!(MemoryView(zeros(T, 3)), mem, Liar())
+            @test_throws ErrorException encode_every!(mem, MemoryView(zeros(T, 3)), Liar())
             # Nothing is consumed from the reader or writer
             io = CursorReader(zeros(UInt8, 10))
             @test_throws ErrorException try_load(io, T, Liar())
             @test_throws ErrorException load_into!(io, MemoryView(zeros(T, 3)), Liar())
-            @test load_all!(io, MemoryView(zeros(UInt8, 20)), LittleEndian()) == 10
+            @test load_all!(io, MemoryView(zeros(UInt8, 20)), LittleEndian()) == (10, 10)
             io = VecWriter()
             @test_throws ErrorException store(io, zero(T), Liar())
+            @test_throws ErrorException store_every(io, MemoryView(zeros(T, 3)), Liar())
+            @test_throws ErrorException store_into(io, MemoryView(zeros(T, 3)), Liar())
             @test_throws ErrorException store_all(io, MemoryView(zeros(T, 3)), Liar())
             @test isempty(io.vec)
         end
@@ -1651,27 +1985,36 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
 
         # Bulk functions
         dst = zeros(UInt16, 3)
-        @test decode_into!(dst, bytes, LittleEndian()) == (3, 6)
+        @test decode_all!(dst, bytes, LittleEndian()) == (3, 6)
         @test dst == [0x0201, 0x0403, 0x0605]
         out = zeros(UInt8, 6)
-        @test encode_into!(out, dst, BigEndian()) == (3, 6)
+        @test encode_all!(out, dst, BigEndian()) == (3, 6)
         @test out == [0x02, 0x01, 0x04, 0x03, 0x06, 0x05]
         dst = zeros(UInt16, 2)
-        @test load_into!(CursorReader(bytes), dst, LittleEndian()) == 2
+        @test load_into!(CursorReader(bytes), dst, LittleEndian()) == (2, 4)
         @test dst == [0x0201, 0x0403]
         dst = zeros(UInt16, 4)
-        @test load_all!(CursorReader(bytes), dst, BigEndian()) == 3
+        @test load_all!(CursorReader(bytes), dst, BigEndian()) == (3, 6)
         @test dst[1:3] == [0x0102, 0x0304, 0x0506]
-        # `load!` returns its argument itself
         dst = zeros(UInt16, 3)
-        @test load!(CursorReader(bytes), dst, BigEndian()) === dst
+        @test load_every!(CursorReader(bytes), dst, BigEndian()) == 6
         @test dst == [0x0102, 0x0304, 0x0506]
+        dst = zeros(UInt16, 2)
+        @test decode_every!(dst, bytes, BigEndian()) == 4
+        @test dst == [0x0102, 0x0304]
+        out = zeros(UInt8, 4)
+        @test encode_every!(out, dst, LittleEndian()) == 4
+        @test out == [0x02, 0x01, 0x04, 0x03]
         io = VecWriter()
-        @test store_all(io, ['a', 'é'], UTF8()) == 3
-        @test io.vec == [0x61, 0xc3, 0xa9]
+        @test store_every(io, ['a', 'é'], UTF8()) == 3
+        @test store_into(io, ['b'], UTF8()) == (1, 1)
+        @test store_all(io, ['c'], UTF8()) == (1, 1)
+        @test io.vec == [0x61, 0xc3, 0xa9, 0x62, 0x63]
         # The convenience modules
         @test Little.decode(bytes, 2, UInt16) === 0x0302
-        @test Big.load!(CursorReader(bytes), zeros(UInt16, 3)) == [0x0102, 0x0304, 0x0506]
+        dst = zeros(UInt16, 3)
+        @test Big.load_every!(CursorReader(bytes), dst) == 6
+        @test dst == [0x0102, 0x0304, 0x0506]
 
         # Strings are not converted implicitly, since that allocates
         s = "abcdef"
@@ -1679,17 +2022,19 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
             @test_throws ArgumentError try_decode(x, UInt8, LittleEndian())
             @test_throws ArgumentError decode(x, 2, UInt8, LittleEndian())
             @test_throws ArgumentError try_decode_next(x, 1, Char, UTF8())
-            @test_throws ArgumentError decode_into!(zeros(UInt8, 2), x, LittleEndian())
-            @test_throws ArgumentError store_all(VecWriter(), x, LittleEndian())
+            @test_throws ArgumentError decode_all!(zeros(UInt8, 2), x, LittleEndian())
+            @test_throws ArgumentError store_every(VecWriter(), x, LittleEndian())
+            @test_throws ArgumentError decode_every!(zeros(UInt8, 2), x, LittleEndian())
+            @test_throws ArgumentError store_into(VecWriter(), x, LittleEndian())
         end
-        @test_throws ArgumentError encode_into!(zeros(UInt8, 4), "ab", UTF8())
+        @test_throws ArgumentError encode_all!(zeros(UInt8, 4), "ab", UTF8())
         # Memory of the wrong element type or mutability is an error, not an infinite
         # recursion
         @test_throws TypeError try_decode(Int8[1, 2], UInt8, LittleEndian())
         @test_throws TypeError try_decode(MemoryView(Int8[1, 2]), UInt8, LittleEndian())
         @test_throws TypeError encode!(ImmutableMemoryView(zeros(UInt8, 2)), 0x01, LittleEndian())
-        @test_throws TypeError decode_into!(ImmutableMemoryView(zeros(UInt8, 2)), bytes, LittleEndian())
-        @test_throws TypeError load!(CursorReader(bytes), ImmutableMemoryView(zeros(UInt16, 2)), LittleEndian())
+        @test_throws TypeError decode_all!(ImmutableMemoryView(zeros(UInt8, 2)), bytes, LittleEndian())
+        @test_throws TypeError load_every!(CursorReader(bytes), ImmutableMemoryView(zeros(UInt16, 2)), LittleEndian())
         # Not memory at all
         @test_throws MethodError try_decode(0x01:0x05, UInt8, LittleEndian())
 
@@ -1737,17 +2082,26 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
             @test M.store(w1, 0x0102) == store(w2, 0x0102, E)
             @test M.try_store(w1, 0x0304) === try_store(w2, 0x0304, E) === 2
             @test M.try_encoded_size(0x0102) === M.encoded_size(0x0102) === 2
-            @test M.store_all(w1, MemoryView(UInt16[1, 2])) == store_all(w2, MemoryView(UInt16[1, 2]), E)
+            @test M.store_every(w1, MemoryView(UInt16[1, 2])) == store_every(w2, MemoryView(UInt16[1, 2]), E)
             @test w1.vec == w2.vec
             d1 = zeros(UInt16, 3)
             d2 = zeros(UInt16, 3)
-            @test M.decode_into!(MemoryView(d1), MemoryView(bytes)) == decode_into!(MemoryView(d2), MemoryView(bytes), E)
+            @test M.decode_all!(MemoryView(d1), MemoryView(bytes)) == decode_all!(MemoryView(d2), MemoryView(bytes), E)
             @test d1 == d2
-            @test M.encode_into!(MemoryView(a), MemoryView(d1)) == encode_into!(MemoryView(b), MemoryView(d2), E)
+            @test M.encode_all!(MemoryView(a), MemoryView(d1)) == encode_all!(MemoryView(b), MemoryView(d2), E)
             @test a == b
             @test M.load_into!(CursorReader(bytes), MemoryView(d1)) == load_into!(CursorReader(bytes), MemoryView(d2), E)
             @test M.load_all!(CursorReader(bytes), MemoryView(d1)) == load_all!(CursorReader(bytes), MemoryView(d2), E)
             @test d1 == d2
+            @test M.load_every!(CursorReader(bytes), MemoryView(d1)[1:2]) == load_every!(CursorReader(bytes), MemoryView(d2)[1:2], E)
+            @test d1 == d2
+            @test M.decode_every!(MemoryView(d1)[1:2], MemoryView(bytes)) == decode_every!(MemoryView(d2)[1:2], MemoryView(bytes), E)
+            @test d1 == d2
+            @test M.encode_every!(MemoryView(a), MemoryView(d1)[1:2]) == encode_every!(MemoryView(b), MemoryView(d2)[1:2], E)
+            @test a == b
+            @test M.store_into(w1, MemoryView(d1)) == store_into(w2, MemoryView(d2), E)
+            @test M.store_all(w1, MemoryView(d1)) == store_all(w2, MemoryView(d2), E)
+            @test w1.vec == w2.vec
         end
         @test_throws MethodError Little.store(VecWriter(), 'a')
     end
@@ -1828,7 +2182,7 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         end
         sum_indexed(ImmutableMemoryView(data))
         @test (@allocated sum_indexed(ImmutableMemoryView(data))) == 0
-        bulk_allocs(dst, mem) = @allocated decode_into!(dst, mem, BigEndian())
+        bulk_allocs(dst, mem) = @allocated decode_all!(dst, mem, BigEndian())
         dst = MemoryView(zeros(UInt32, 250))
         mem = ImmutableMemoryView(data)
         bulk_allocs(dst, mem)

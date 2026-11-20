@@ -45,12 +45,16 @@ export Encoding,
     load_exact,
     try_store,
     store,
-    decode_into!,
-    encode_into!,
+    decode_all!,
+    decode_every!,
+    encode_all!,
+    encode_every!,
     load_into!,
     load_all!,
-    load!,
-    store_all
+    load_every!,
+    store_into,
+    store_all,
+    store_every
 
 public Little,
     Big,
@@ -72,6 +76,7 @@ include("errors.jl")
 include("interface.jl")
 include("bits.jl")
 include("utf8.jl")
+include("tuples.jl")
 include("io.jl")
 include("bulk.jl")
 include("memory.jl")

@@ -24,12 +24,16 @@ const convenience_functions = (
     (:load_exact, (:(io::AbstractBufReader), :(nbytes::Integer), :(T::Type))),
     (:try_store, (:(io::AbstractBufWriter), :x)),
     (:store, (:(io::AbstractBufWriter), :x)),
-    (:decode_into!, (:dst, :src)),
-    (:encode_into!, (:dst, :src)),
+    (:decode_all!, (:dst, :src)),
+    (:decode_every!, (:dst, :src)),
+    (:encode_all!, (:dst, :src)),
+    (:encode_every!, (:dst, :src)),
     (:load_into!, (:(io::AbstractBufReader), :dst)),
     (:load_all!, (:(io::AbstractBufReader), :dst)),
-    (:load!, (:(io::AbstractBufReader), :dst)),
+    (:load_every!, (:(io::AbstractBufReader), :dst)),
+    (:store_into, (:(io::AbstractBufWriter), :src)),
     (:store_all, (:(io::AbstractBufWriter), :src)),
+    (:store_every, (:(io::AbstractBufWriter), :src)),
 )
 
 for (mod, E, desc) in (
