@@ -2,8 +2,6 @@
 # encoding argument.
 const convenience_functions = (
     (:max_encoded_size, (:(T::Type),)),
-    (:try_encoded_size, (:x,)),
-    (:encoded_size, (:x,)),
     (:try_decode, (:mem, :(T::Type))),
     (:try_decode, (:mem, :(i::Integer), :(T::Type))),
     (:decode, (:mem, :(T::Type))),

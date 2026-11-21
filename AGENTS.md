@@ -14,8 +14,10 @@ Explicit non-goals of this package are:
 
 ## Code Conventions
 Performance is very important for this codebase.
+
 * Where codegen may improve, keep fast paths inline and extract slow/cold paths into `@noinline` helper functions. Especially check if error throwing code could be outlined.
-* Design APIs that allow for use of `@inbounds` that is statically guaranteed to be correct.* The code base is formatted by Runic. Run `runic -i .` after changes. If formatting fails, alert the user and do not attempt to install Runic.
+* Design APIs that allow for use of `@inbounds` that is statically guaranteed to be correct.
+* The code base is formatted by Runic. Run `runic -i .` after changes. If formatting fails, alert the user and do not attempt to install Runic.
 
 ### When committing
 Do not add yourself (you, the agent) as a co-author.

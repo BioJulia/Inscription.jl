@@ -36,19 +36,13 @@ is_valid_bits(::Type{<:Tuple}, ::NTuple{N, UInt8}) where {N} = true
 for E in (LittleEndian, BigEndian)
     @eval begin
         @inline function codec_max_encoded_size(::Type{T}, enc::$E) where {T <: Tuple}
-            return tuple_max_encoded_size(T, enc)
+            return Val(tuple_max_encoded_size(T, enc))
         end
-        @inline function codec_try_encoded_size(x::Tuple, enc::$E)
-            return tuple_try_encoded_size(x, enc)
+        @inline function codec_try_decode(input::DecodeInput, ::Type{T}, enc::$E) where {T <: Tuple}
+            return tuple_try_decode(input, T, enc)
         end
-        @inline function codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{T}, enc::$E) where {T <: Tuple}
-            return tuple_try_decode(mem, T, enc)
-        end
-        @inline function codec_bytes_needed(mem::ImmutableMemoryView{UInt8}, ::Type{T}, enc::$E) where {T <: Tuple}
-            return tuple_bytes_needed(mem, T, enc)
-        end
-        @inline function codec_try_encode!(mem::MutableMemoryView{UInt8}, x::Tuple, enc::$E)
-            return tuple_try_encode!(mem, x, enc)
+        @inline function codec_try_encode!(output::EncodeOutput, x::Tuple, enc::$E)
+            return tuple_try_encode!(output, x, enc)
         end
     end
 end
@@ -72,92 +66,44 @@ end
     return tuple_body(T, Fs -> (:(+($((:(max_encoded_size($F, enc)) for F in Fs)...))),))
 end
 
-@generated function tuple_try_encoded_size(x::Tuple, enc::Endianness)
-    return tuple_body(
-        x, Fs -> [
-            :(n = 0);
-            [:(n += @? try_encoded_size(x[$i], enc)) for i in eachindex(Fs)];
-            :(return n)
-        ]
-    )
-end
-
-@generated function tuple_try_decode(
-        mem::ImmutableMemoryView{UInt8}, ::Type{T}, enc::Endianness
-    ) where {T}
+# The elements are decoded with `decode_field`, which passes on the input after each
+# element. On the fast path, the input of each element is known to hold its
+# `max_encoded_size` bytes when the codec is compiled, also after elements whose
+# encodings vary in size. With partial input, the result is decided when an element
+# fails, or all elements are decided.
+@generated function tuple_try_decode(input::DecodeInput, ::Type{T}, enc::Endianness) where {T}
     return tuple_body(
         T, Fs -> begin
             xs = [Symbol(:x, i) for i in eachindex(Fs)]
+            ns = [Symbol(:n, i) for i in eachindex(Fs)]
+            inputs = [Symbol(:input, i) for i in 0:length(Fs)]
             [
-                :(offset = 0);
+                :($(inputs[1]) = input);
                 [
-                    :(($(xs[i]), offset) = @? try_decode_element(mem, offset, $F, enc))
+                    :(($(xs[i]), $(ns[i]), $(inputs[i + 1])) = @? decode_field($(inputs[i]), $F, enc))
                         for (i, F) in enumerate(Fs)
                 ];
-                :(return (tuple($(xs...)), offset))
+                :(return (tuple($(xs...)), +($(ns...))))
             ]
         end
     )
 end
 
-# Decode the element type F at byte offset `offset` of `mem`, which is at most the
-# length of `mem`, and return it with the offset after it, or the error of the tuple
-@inline function try_decode_element(
-        mem::ImmutableMemoryView{UInt8}, offset::Int, ::Type{F}, enc::Endianness
-    )::Union{Tuple{F, Int}, DecodeError} where {F}
-    result = try_decode_sized(unsafe_suffix(mem, offset + 1), 1, F, enc)
-    if result isa DecodeError
-        # The input ended after the encodings of the elements before, so within the tuple
-        result.kind === EndOfInput && offset > 0 && return DecodeError(Truncated)
-        return result
-    end
-    (x, n) = result
-    return (x, offset + n)
-end
-
-# The bytes that decide the result of decoding a T are those that decide each element,
-# up to the first one that fails to decode, see `codec_bytes_needed`. Elements are only
-# decoded from bytes that decide them, so they decode as from the complete input.
-@generated function tuple_bytes_needed(
-        mem::ImmutableMemoryView{UInt8}, ::Type{T}, enc::Endianness
-    ) where {T}
+# As for decoding. If the output is too short, the elements before the one that didn't
+# fit have been written, which the contract of `codec_try_encode!` allows.
+@generated function tuple_try_encode!(output::EncodeOutput, x::Tuple, enc::Endianness)
     return tuple_body(
-        T, Fs -> [
-            :(offset = 0);
-            # An element may need bytes after its encoding, e.g. a terminator
-            :(decided = 0);
+        x, Fs -> begin
+            ns = [Symbol(:n, i) for i in eachindex(Fs)]
+            outputs = [Symbol(:output, i) for i in 0:length(Fs)]
             [
-                quote
-                    rest = unsafe_suffix(mem, offset + 1)
-                    needed = bytes_needed(rest, $F, enc)
-                    decided = max(decided, offset + needed)
-                    needed > length(rest) && return decided
-                    result = try_decode_sized(rest, 1, $F, enc)
-                    result isa DecodeError && return decided
-                    offset += last(result)
-                end
-                    for F in Fs
-            ];
-            :(return decided)
-        ]
-    )
-end
-
-# Nothing may be written when there is too little space, so check the size first, unless
-# there is room for any encoding. Then, the elements can only fail if they can't be
-# encoded.
-@generated function tuple_try_encode!(mem::MutableMemoryView{UInt8}, x::Tuple, enc::Endianness)
-    return tuple_body(
-        x, Fs -> [
-            quote
-                if length(mem) < max_encoded_size($x, enc)
-                    size = @? try_encoded_size(x, enc)
-                    length(mem) < size && return EncodeError(InsufficientSpace)
-                end
-                offset = 0
-            end;
-            [:(offset += @? _try_encode!(unsafe_suffix(mem, offset + 1), 1, x[$i], enc)) for i in eachindex(Fs)];
-            :(return offset)
-        ]
+                :($(outputs[1]) = output);
+                [
+                    :(($(ns[i]), $(outputs[i + 1])) = @? encode_field($(outputs[i]), x[$i], enc))
+                        for i in eachindex(Fs)
+                ];
+                :(return +($(ns...)))
+            ]
+        end
     )
 end

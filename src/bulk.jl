@@ -104,7 +104,7 @@ function decode_every!(
 end
 
 # Decode elements of src into dst. If `complete` is false, src is not the complete input,
-# so only decode elements that the bytes in src decide, see `codec_bytes_needed`.
+# so only decode elements that the bytes in src decide, see `codec_try_decode`.
 @inline function decode_elements!(
         dst::MutableMemoryView{T},
         src::ImmutableMemoryView{UInt8},
@@ -127,17 +127,13 @@ end
         end
         return (n_max, n_max * element_size)
     end
-    max_size = codec_max_encoded_size(T, enc)
     n_elements = 0
     n_bytes = 0
     while n_elements < length(dst)
         rest = @inbounds src[(n_bytes + 1):end]
-        # By rule 4 of `codec_try_decode`, `max_size` bytes decide the element
-        if !complete && length(rest) < max_size && codec_bytes_needed(rest, T, enc) > length(rest)
-            break
-        end
-        result = call_codec_try_decode(rest, T, enc)
-        result isa DecodeError && break
+        # With partial input, an element that is not decided yet also gives `TooShort`
+        result = decode_start(rest, T, enc, complete)
+        result isa Union{TooShort, Invalid} && break
         (x, n) = result
         n_elements += 1
         @inbounds dst[n_elements] = x
@@ -176,10 +172,10 @@ the index after the bytes written. To throw an error instead, use
 The argument `dst` is converted to `MutableMemoryView{UInt8}`, and `src` to
 `ImmutableMemoryView{T}`. These two arrays may not alias (overlap in memory).
 
-Only the first n_bytes_written bytes of dst are written,
-except when encoding stopped because an element can't be encoded (InvalidValue).
-Then the contents of up to [max_encoded_size(T, enc)](@ref max_encoded_size) bytes
-after the returned count, but not past the end of dst, are unspecified.
+If encoding stopped before `src` was exhausted, up to
+[max_encoded_size(T, enc)](@ref max_encoded_size) bytes after the first
+`n_bytes_written`, but not past the end of `dst`, may have been written, and their
+contents are unspecified.
 
 See also: [`decode_all!`](@ref), [`store_all`](@ref)
 
@@ -217,8 +213,8 @@ function encode_all!(
     n_bytes = 0
     for n_elements in 0:(length(src) - 1)
         x = @inbounds src[n_elements + 1]
-        n = call_codec_try_encode!((@inbounds dst[(n_bytes + 1):end]), x, enc)
-        n isa EncodeError && return (n_elements, n_bytes)
+        n = encode_start(unsafe_suffix(dst, n_bytes + 1), x, enc)
+        n isa Union{TooShort, Invalid} && return (n_elements, n_bytes)
         n_bytes += n
     end
     return (length(src), n_bytes)
@@ -239,8 +235,7 @@ If an element can't be encoded, throw an exception:
 
 If encode_every! throws, the elements before the failing one have been encoded
 into the start of `dst`.
-If the error is a `LightBoundsError`, nothing else was written.
-If it is an EncodeError, the contents of up to
+Then, the contents of up to
 [`max_encoded_size`(T, enc)](@ref max_encoded_size) bytes from where the failing element
 would start, but not past the end of `dst`, are unspecified.
 

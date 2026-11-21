@@ -14,16 +14,13 @@ A type may be written in several different ways. For example, `0xa53b` may be wr
 This is modelled as zero-sized [`Encoding`](@ref) subtypes.
 Users may define arbitrary `Encoding`s and implement codecs for them.
 
-This API consists of four mandatory methods.
+This API consists of three mandatory methods.
 See their docstrings for details (click them to go to their docstring in this documentation).
-* [`BitScribbling.codec_max_encoded_size`](@ref) gives the maximal size in bytes for the encoding of any instance of a type.
-* [`BitScribbling.codec_try_encoded_size`](@ref) gives the precise number of bytes needed to encode an instance `x::T`, or returns an error if it cannot be encoded.
-* [`BitScribbling.codec_try_decode`](@ref) attempts to decode an instance of `T` from a byte array.
-* [`BitScribbling.codec_try_encode!`](@ref) attempts to encode an instance of `T` into a byte array.
+* [`BitScribbling.codec_max_encoded_size`](@ref) gives the maximal size in bytes for the encoding of any instance of a type, as a `Val`.
+* [`BitScribbling.codec_try_decode`](@ref) attempts to decode an instance of `T` from a [`BitScribbling.DecodeInput`](@ref).
+* [`BitScribbling.codec_try_encode!`](@ref) attempts to encode an instance of `T` into an [`BitScribbling.EncodeOutput`](@ref).
 
-There is currently also one optional method:
-
-* [`BitScribbling.codec_bytes_needed`](@ref) given an incompletely buffered `T`, hints how many bytes to buffer, at minimum. This is useful to avoid forcing the buffering of the maximal number of bytes of any instance `T`, if fewer than such bytes are available. This is only useful for variable-length encodings, like `Char`'s `UTF8` encoding.
+`codec_try_decode` reads its input through [`BitScribbling.require_bytes`](@ref), [`BitScribbling.peek_byte`](@ref) and [`BitScribbling.decode_field`](@ref), and `codec_try_encode!` writes its output through [`BitScribbling.reserve_bytes`](@ref) and [`BitScribbling.encode_field`](@ref). When loading from an `AbstractBufReader`, these make the reader wait for exactly the bytes the codec reads, so a codec for a variable-length encoding, like `Char`'s `UTF8` encoding, doesn't make loading wait for the maximal number of bytes of any instance of `T`. A codec is compiled twice: for inputs and outputs known to hold the maximal number of bytes, where the checks of these functions are removed, and for shorter ones, near the end of the data.
 
 ## Deriving codecs automatically
 Two codecs are special: `LittleEndian` and `BigEndian` (together: [`Endianness`](@ref)) represent the "native" binary representation of an object.

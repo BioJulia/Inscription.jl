@@ -26,15 +26,10 @@ See also: [`Endianness`](@ref)
 ## Manually implementing a codec
 Before doing so, check if you can opt into already-generated codecs via [`BitsKind`](@ref).
 
-A hand-written codec for `T` and an encoding type `E` consists of four methods:
+A hand-written codec for `T` and an encoding type `E` consists of three methods:
 * [`codec_max_encoded_size(::Type{T}, ::E)`](@ref codec_max_encoded_size)
-* [`codec_try_encoded_size(x::T, ::E)`](@ref codec_try_encoded_size)
-* [`codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{T}, ::E)`](@ref codec_try_decode)
-* [`codec_try_encode!(mem::MutableMemoryView{UInt8}, x::T, ::E)`](@ref codec_try_encode!)
-
-Optionally, it can also implement
-[`codec_bytes_needed(mem::ImmutableMemoryView{UInt8}, ::Type{T}, ::E)`](@ref codec_bytes_needed),
-so that loading a `T` doesn't wait for more bytes than it needs.
+* [`codec_try_decode(input::DecodeInput, ::Type{T}, ::E)`](@ref codec_try_decode)
+* [`codec_try_encode!(output::EncodeOutput, x::T, ::E)`](@ref codec_try_encode!)
 
 To avoid ambiguity errors, `E` must be a concrete encoding type. Do not implement
 codecs for non-concrete types such as `Encoding` or `Endianness`.
@@ -123,3 +118,77 @@ julia> decode(MemoryView(b"\\xe2\\x82"), Char, UTF8()) # truncated input: a malf
 ```
 """
 struct UTF8 <: Encoding end
+
+"""
+    DecodeInput{L}
+
+The input of [`codec_try_decode`](@ref): the bytes to decode a value from. It holds at
+least `L` bytes. A codec reads it only through these functions, and returns their
+[`TooShort`](@ref) with [`@?`](@ref):
+* [`require_bytes(input, n)`](@ref require_bytes): the first `n` bytes, as a memory view
+  of length `n`;
+* [`peek_byte(input, i)`](@ref peek_byte): the byte at index `i`, or `nothing` if the
+  input ends before it. For encodings whose end is decided by the byte after it;
+* [`decode_field(input, T, enc)`](@ref decode_field): a value of type `T` from the start,
+  the number of bytes it used, and the input after them.
+
+A codec is compiled for two kinds of input, and doesn't need to tell them apart:
+* Usually, `L` is [`max_encoded_size(T, enc)`](@ref max_encoded_size). Then the reads
+  within the first `L` bytes can't fail, and since `L` is a constant, their checks are
+  removed when the codec is compiled.
+* Near the end of the data, or of a reader's buffer, `L` is zero, and the reads check the
+  length.
+
+The input may be partial: when loading from an `AbstractBufReader`, it may be the reader's
+buffer, and more bytes may arrive later. When a codec asks for bytes that haven't arrived
+yet, these functions return `TooShort`, which means that more bytes are needed. So a
+codec decodes partial input correctly without handling it: its result depends only on
+the bytes it looked at, and those are the same however the input continues.
+
+The input ends after `max_encoded_size(T, enc)` bytes, also if more bytes follow, so a
+codec can't read beyond them.
+"""
+struct DecodeInput{L}
+    mem::ImmutableMemoryView{UInt8}
+    # Whether the input ends at the end of `mem`. If not, more bytes may follow `mem`.
+    ends::Bool
+    # The number of bytes before `mem` in the input that the package gave to the codec.
+    # Inputs after fields, made by `decode_field`, start after the start of that input.
+    # `TooShort` counts from there.
+    offset::Int
+    # Internal. The caller must ensure that `length(mem) ≥ L`.
+    function DecodeInput{L}(mem::ImmutableMemoryView{UInt8}, ends::Bool, offset::Int = 0) where {L}
+        L isa Int && L ≥ 0 || error("L must be a non-negative Int")
+        return new{L}(mem, ends, offset)
+    end
+end
+
+"""
+    EncodeOutput{L}
+
+The output of [`codec_try_encode!`](@ref): the bytes to encode a value into. It holds at
+least `L` bytes. A codec writes it only through these functions, and returns their
+[`TooShort`](@ref) with [`@?`](@ref):
+* [`reserve_bytes(output, n)`](@ref reserve_bytes): the first `n` bytes, as a mutable
+  memory view of length `n`, for the codec to write;
+* [`encode_field(output, x, enc)`](@ref encode_field): encode `x` at the start, and
+  return the number of bytes written, and the output after them.
+
+As for [`DecodeInput`](@ref), `L` is usually
+[`max_encoded_size(T, enc)`](@ref max_encoded_size), and the checks of the writes within
+the first `L` bytes are removed when the codec is compiled. Near the end of the memory,
+`L` is zero.
+
+The output ends after `max_encoded_size(T, enc)` bytes, also if the memory continues, so
+a codec can't write beyond them.
+"""
+struct EncodeOutput{L}
+    mem::MutableMemoryView{UInt8}
+    # As for `DecodeInput`
+    offset::Int
+    # Internal. The caller must ensure that `length(mem) ≥ L`.
+    function EncodeOutput{L}(mem::MutableMemoryView{UInt8}, offset::Int = 0) where {L}
+        L isa Int && L ≥ 0 || error("L must be a non-negative Int")
+        return new{L}(mem, offset)
+    end
+end

@@ -35,8 +35,8 @@ are buffered.
 For variable-length encodings, like `Char`'s `UTF8` encoding, this can cause blocking.
 Suppose `io` contains the single byte `'a'` (byte `0x61`) and blocks until that is read.
 A char encodes in up to 4 bytes, so `io` would wait indefinitely for more bytes to arrive.
-But, because `codec_bytes_needed([0x61], Char, UTF8())` is implemented and returns 1,
-`io` will know to only buffer 1 byte and so will not block.
+But the codec of `Char` for `UTF8` only reads the byte `0x61` to decode `'a'`, so `io`
+doesn't wait for more, see [`DecodeInput`](@ref).
 
 ## Too short buffers
 If `io` is not EOF, and its buffer contains fewer bytes than needed according to the
@@ -79,18 +79,22 @@ end
 
 # Buffer bytes until the first T in the buffer of `io` is decided, or `io` is at EOF.
 # Return the buffer, and whether it is the complete input, i.e. `io` is at EOF.
-# Either way, decoding from the buffer gives the right answer: the bytes that decide it
-# are buffered, by the contract of `codec_bytes_needed`, or the buffer is all the input.
-# Rule 4 of `codec_try_decode` bounds the bytes needed by `max_encoded_size`, so the
-# loop ends, also if `codec_bytes_needed` breaks its contract.
+# Either way, decoding from the buffer as complete input gives the right answer: the
+# result is decided by the buffered bytes, or the buffer is all the input.
+# `max_encoded_size` bytes always decide the result, so the loop ends, also if the codec
+# breaks its contract.
 function buffer_decided(
         io::AbstractBufReader, ::Type{T}, enc::Encoding
     )::Tuple{ImmutableMemoryView{UInt8}, Bool} where {T}
     max_size = max_encoded_size(T, enc)
     buffer = get_buffer(io)::ImmutableMemoryView{UInt8}
     while length(buffer) < max_size
-        needed = min(bytes_needed(buffer, T, enc), max_size)
-        needed ≤ length(buffer) && break
+        result = decode_start(buffer, T, enc, false)
+        result isa TooShort || break
+        # Buffer the bytes that the codec asked for. A codec that breaks its contract may
+        # ask for fewer than the buffer has, or more than `max_size`, so clamp it. Then
+        # the buffer grows by at least one byte, and the loop ends.
+        needed = clamp(result.needed, length(buffer) + 1, max_size)
         # Throws `BufferTooShort` if the capacity of `io` is smaller than `needed`
         new_buffer = get_nonempty_buffer(io, needed)
         # nothing means EOF before `needed` bytes could be buffered

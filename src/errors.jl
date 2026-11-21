@@ -165,7 +165,7 @@ A failure to encode or store a value. It has the public property
 
 Functions prefixed with `try_` return an `EncodeError` instead of throwing it:
 * [`try_encode!`](@ref) returns either kind.
-* [`try_store`](@ref) and [`try_encoded_size`](@ref) only return `InvalidValue`.
+* [`try_store`](@ref) only returns `InvalidValue`.
 
 The functions without the prefix throw an `InvalidValue` error as it is. [`encode!`](@ref)
 throws a `LightBoundsError` instead of an `InsufficientSpace` error.
@@ -199,10 +199,43 @@ function Base.showerror(io::IO, err::EncodeError)
 end
 
 """
+    TooShort
+
+Returned by the functions that a codec reads or writes bytes through, when the input or
+output is too short, and returned by the codec with [`@?`](@ref). See
+[`DecodeInput`](@ref) and [`EncodeOutput`](@ref). A codec does not construct it itself.
+
+The public property `.needed::Int` is the number of bytes that were asked for, counted
+from the start of the input or output that the package gave to the codec. It is larger
+than that input or output.
+
+When decoding partial input, as when loading from a reader, `TooShort` means that more
+bytes are needed to decide the result, and a reader buffers `needed` bytes before it
+calls the codec again. A codec never returns it when its input or output has
+[`max_encoded_size`](@ref) bytes.
+
+See also: [`Invalid`](@ref)
+"""
+struct TooShort
+    needed::Int
+end
+
+"""
+    Invalid()
+
+Returned by a codec when the input is not a valid encoding, or when the value can't be
+encoded.
+
+See also: [`TooShort`](@ref)
+"""
+struct Invalid end
+
+"""
     @? expr
 
-Evaluate `expr`. If the result is a [`DecodeError`](@ref) or an [`EncodeError`](@ref),
-return it from the enclosing function. Otherwise, the macro evaluates to the result.
+Evaluate `expr`. If the result is a [`DecodeError`](@ref), an [`EncodeError`](@ref),
+[`TooShort`](@ref) or [`Invalid`](@ref), return it from the enclosing function.
+Otherwise, the macro evaluates to the result.
 
 # Examples
 ```jldoctest
@@ -222,7 +255,7 @@ DecodeError(BitScribbling.DecodeErrorKinds.Truncated)
 macro var"?"(expr)
     return quote
         result = $(esc(expr))
-        result isa Union{DecodeError, EncodeError} && return result
+        result isa Union{DecodeError, EncodeError, TooShort, Invalid} && return result
         result
     end
 end

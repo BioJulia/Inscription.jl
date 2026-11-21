@@ -2,6 +2,7 @@ using Test
 using BitScribbling
 using BitScribbling: DecodeErrorKinds, EncodeErrorKinds, Little, Big
 using BitScribbling: bits_kind, BitsLoadable, BitsStorable, Opaque, is_valid_bits, as_unsigned
+using BitScribbling: DecodeInput, EncodeOutput, TooShort, Invalid, require_bytes, peek_byte, decode_field, reserve_bytes, encode_field
 using BitScribbling.DecodeErrorKinds: EndOfInput, Truncated, InvalidData, TrailingData
 using BitScribbling.EncodeErrorKinds: InsufficientSpace, InvalidValue
 using BufferIO
@@ -19,6 +20,9 @@ bytes_le(x) = collect(reinterpret(UInt8, [htol(x)]))
 bytes_be(x) = collect(reinterpret(UInt8, [hton(x)]))
 
 is_err(x, kind) = x isa DecodeError && x.kind === kind
+
+# Scratch memory to encode into, long enough for any value in these tests
+const SCRATCH = MemoryView(zeros(UInt8, 64))
 
 # Decode a T from the start of `mem`, and return it with the number of bytes used, or the
 # error. Also check that `try_decode` and `try_decode_next` agree.
@@ -99,15 +103,15 @@ if HAS_NARROW
     # Codecs are defined for concrete encoding types only, so one per byte order
     for E in (LittleEndian, BigEndian)
         @eval begin
-            BitScribbling.codec_max_encoded_size(::Type{U29}, ::$E) = 4
-            BitScribbling.codec_try_encoded_size(::U29, ::$E) = 4
-            function BitScribbling.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{U29}, e::$E)
-                raw = @? try_decode(mem, UInt32, e)
-                raw > 0x1fffffff && return DecodeError(InvalidData)
-                return (U29(raw), 4)
+            BitScribbling.codec_max_encoded_size(::Type{U29}, ::$E) = Val(4)
+            function BitScribbling.codec_try_decode(input::DecodeInput, ::Type{U29}, e::$E)
+                (raw, n, _) = @? decode_field(input, UInt32, e)
+                raw > 0x1fffffff && return Invalid()
+                return (U29(raw), n)
             end
-            function BitScribbling.codec_try_encode!(mem::MutableMemoryView{UInt8}, x::U29, e::$E)
-                return try_encode!(mem, UInt32(x), e)
+            function BitScribbling.codec_try_encode!(output::EncodeOutput, x::U29, e::$E)
+                (n, _) = @? encode_field(output, UInt32(x), e)
+                return n
             end
         end
     end
@@ -115,14 +119,13 @@ end
 
 # A custom encoding defined by a format package
 struct CBool <: Encoding end
-BitScribbling.codec_max_encoded_size(::Type{Bool}, ::CBool) = 1
-BitScribbling.codec_try_encoded_size(::Bool, ::CBool) = 1
-function BitScribbling.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{Bool}, ::CBool)
-    isempty(mem) && return DecodeError(EndOfInput)
-    return (!iszero(mem[1]), 1)
+BitScribbling.codec_max_encoded_size(::Type{Bool}, ::CBool) = Val(1)
+function BitScribbling.codec_try_decode(input::DecodeInput, ::Type{Bool}, ::CBool)
+    b = @? require_bytes(input, 1)
+    return (!iszero(b[1]), 1)
 end
-function BitScribbling.codec_try_encode!(mem::MutableMemoryView{UInt8}, x::Bool, ::CBool)
-    isempty(mem) && return EncodeError(InsufficientSpace)
+function BitScribbling.codec_try_encode!(output::EncodeOutput, x::Bool, ::CBool)
+    mem = @? reserve_bytes(output, 1)
     mem[1] = x
     return 1
 end
@@ -130,19 +133,18 @@ end
 # A codec that reports whether its own `@boundscheck` blocks ran. `@inbounds` at the call
 # of `try_decode` or `encode!` must not reach into the codec.
 struct Probe <: Encoding end
-BitScribbling.codec_max_encoded_size(::Type{Bool}, ::Probe) = 1
-BitScribbling.codec_try_encoded_size(::Bool, ::Probe) = 1
-@inline function BitScribbling.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{Bool}, ::Probe)
-    isempty(mem) && return DecodeError(EndOfInput)
+BitScribbling.codec_max_encoded_size(::Type{Bool}, ::Probe) = Val(1)
+@inline function BitScribbling.codec_try_decode(input::DecodeInput, ::Type{Bool}, ::Probe)
+    @? require_bytes(input, 1)
     checked = false
     @boundscheck checked = true
     return (checked, 1)
 end
-@inline function BitScribbling.codec_try_encode!(mem::MutableMemoryView{UInt8}, ::Bool, ::Probe)
-    isempty(mem) && return EncodeError(InsufficientSpace)
+@inline function BitScribbling.codec_try_encode!(output::EncodeOutput, ::Bool, ::Probe)
+    mem = @? reserve_bytes(output, 1)
     checked = false
     @boundscheck checked = true
-    @inbounds mem[1] = checked
+    mem[1] = checked
     return 1
 end
 
@@ -151,69 +153,119 @@ end
 struct Flaky <: Encoding end
 const FLAKY_CALLS = Ref(0)
 flaky_fails() = isodd(FLAKY_CALLS[] += 1)
-BitScribbling.codec_max_encoded_size(::Type{Int8}, ::Flaky) = 1
-BitScribbling.codec_try_encoded_size(::Int8, ::Flaky) = 1
-function BitScribbling.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{Int8}, ::Flaky)
-    isempty(mem) && return DecodeError(EndOfInput)
-    flaky_fails() && return DecodeError(InvalidData)
-    return (mem[1] % Int8, 1)
+BitScribbling.codec_max_encoded_size(::Type{Int8}, ::Flaky) = Val(1)
+function BitScribbling.codec_try_decode(input::DecodeInput, ::Type{Int8}, ::Flaky)
+    b = @? require_bytes(input, 1)
+    flaky_fails() && return Invalid()
+    return (b[1] % Int8, 1)
 end
-function BitScribbling.codec_try_encode!(mem::MutableMemoryView{UInt8}, x::Int8, ::Flaky)
-    isempty(mem) && return EncodeError(InsufficientSpace)
-    flaky_fails() && return EncodeError(InvalidValue)
+function BitScribbling.codec_try_encode!(output::EncodeOutput, x::Int8, ::Flaky)
+    mem = @? reserve_bytes(output, 1)
+    flaky_fails() && return Invalid()
     mem[1] = x % UInt8
     return 1
 end
 
 # A codec that breaks its contract, by returning byte counts out of range
 struct Liar <: Encoding end
-BitScribbling.codec_max_encoded_size(::Type{<:Union{Int8, Int16, UInt8}}, ::Liar) = 2
-# More bytes than `mem` has
-BitScribbling.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{Int8}, ::Liar) = (Int8(0), length(mem) + 1)
-BitScribbling.codec_try_encode!(mem::MutableMemoryView{UInt8}, ::Int8, ::Liar) = length(mem) + 1
+BitScribbling.codec_max_encoded_size(::Type{<:Union{Int8, Int16, UInt8, UInt16}}, ::Liar) = Val(2)
+# More bytes than the input has, which ends after `max_encoded_size` bytes
+BitScribbling.codec_try_decode(::DecodeInput, ::Type{Int8}, ::Liar) = (Int8(0), 3)
+BitScribbling.codec_try_encode!(output::EncodeOutput, ::Int8, ::Liar) = length(output.mem) + 1
 # A negative count
-BitScribbling.codec_try_decode(::ImmutableMemoryView{UInt8}, ::Type{Int16}, ::Liar) = (Int16(0), -1)
-BitScribbling.codec_try_encode!(::MutableMemoryView{UInt8}, ::Int16, ::Liar) = -1
-# More bytes than `max_encoded_size`, but within `mem`: a bug, but no undefined behaviour,
-# so it's not caught
-BitScribbling.codec_try_decode(::ImmutableMemoryView{UInt8}, ::Type{UInt8}, ::Liar) = (0x00, 3)
-BitScribbling.codec_try_encode!(::MutableMemoryView{UInt8}, ::UInt8, ::Liar) = 3
+BitScribbling.codec_try_decode(::DecodeInput, ::Type{Int16}, ::Liar) = (Int16(0), -1)
+BitScribbling.codec_try_encode!(::EncodeOutput, ::Int16, ::Liar) = -1
+# More bytes than `max_encoded_size`. The input and output end after `max_encoded_size`
+# bytes, so this is caught.
+BitScribbling.codec_try_decode(::DecodeInput, ::Type{UInt8}, ::Liar) = (0x00, 3)
+BitScribbling.codec_try_encode!(::EncodeOutput, ::UInt8, ::Liar) = 3
+# More bytes than the input or output has, on the slow path, where it is shorter than
+# `max_encoded_size`
+BitScribbling.codec_try_decode(input::DecodeInput, ::Type{UInt16}, ::Liar) = (0x0000, length(input.mem) + 1)
+BitScribbling.codec_try_encode!(output::EncodeOutput, ::UInt16, ::Liar) = length(output.mem) + 1
+BitScribbling.codec_max_encoded_size(::Type{Int32}, ::Liar) = 4
+
+# Decimal digits of a `UInt8`, without a terminator. The value is decided by the byte
+# after its last digit, or by 3 digits.
+struct Decimal <: Encoding end
+BitScribbling.codec_max_encoded_size(::Type{UInt8}, ::Decimal) = Val(3)
+function BitScribbling.codec_try_decode(input::DecodeInput, ::Type{UInt8}, ::Decimal)
+    @? require_bytes(input, 1)
+    value = 0
+    n = 0
+    while n < 3
+        byte = @? peek_byte(input, n + 1)
+        (byte === nothing || !(UInt8('0') ≤ byte ≤ UInt8('9'))) && break
+        value = 10 * value + (byte - UInt8('0'))
+        n += 1
+    end
+    (n == 0 || value > 255) && return Invalid()
+    return (UInt8(value), n)
+end
+
+# A length byte, followed by that many bytes, each 0x01. Decodes to the length. Counts its
+# calls, to check that a reader buffers the bytes it asks for at once.
+struct Prefixed <: Encoding end
+const PREFIXED_CALLS = Ref(0)
+BitScribbling.codec_max_encoded_size(::Type{UInt64}, ::Prefixed) = Val(256)
+function BitScribbling.codec_try_decode(input::DecodeInput, ::Type{UInt64}, ::Prefixed)
+    PREFIXED_CALLS[] += 1
+    k = Int((@? require_bytes(input, 1))[1])
+    bytes = @? require_bytes(input, 1 + k)
+    all(==(0x01), bytes[2:end]) || return Invalid()
+    return (UInt64(k), 1 + k)
+end
+function BitScribbling.codec_try_encode!(output::EncodeOutput, x::UInt64, ::Prefixed)
+    x ≤ 255 || return Invalid()
+    mem = @? reserve_bytes(output, 1 + Int(x))
+    mem[1] = x % UInt8
+    fill!(mem[2:end], 0x01)
+    return 1 + Int(x)
+end
+
+# Asks for more bytes than its `max_encoded_size`, which it never gets
+struct Greedy <: Encoding end
+BitScribbling.codec_max_encoded_size(::Type{UInt8}, ::Greedy) = Val(2)
+function BitScribbling.codec_try_decode(input::DecodeInput, ::Type{UInt8}, ::Greedy)
+    b = @? require_bytes(input, 3)
+    return (b[3], 3)
+end
+function BitScribbling.codec_try_encode!(output::EncodeOutput, ::UInt8, ::Greedy)
+    @? reserve_bytes(output, 3)
+    return Invalid()
+end
+function BitScribbling.codec_try_encode!(output::EncodeOutput, x::UInt8, ::Decimal)
+    s = string(x)
+    mem = @? reserve_bytes(output, ncodeunits(s))
+    copyto!(mem, codeunits(s))
+    return ncodeunits(s)
+end
 
 # An 8-bit character set, which can't encode most `Char`s
 struct Latin1 <: Encoding end
 is_latin1(c::Char) = isvalid(c) && codepoint(c) ≤ 0xff
-BitScribbling.codec_max_encoded_size(::Type{Char}, ::Latin1) = 1
-BitScribbling.codec_try_encoded_size(c::Char, ::Latin1) = is_latin1(c) ? 1 : EncodeError(InvalidValue)
-function BitScribbling.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{Char}, ::Latin1)
-    isempty(mem) && return DecodeError(EndOfInput)
-    return (Char(mem[1]), 1)
+BitScribbling.codec_max_encoded_size(::Type{Char}, ::Latin1) = Val(1)
+function BitScribbling.codec_try_decode(input::DecodeInput, ::Type{Char}, ::Latin1)
+    b = @? require_bytes(input, 1)
+    return (Char(b[1]), 1)
 end
-function BitScribbling.codec_try_encode!(mem::MutableMemoryView{UInt8}, c::Char, ::Latin1)
-    is_latin1(c) || return EncodeError(InvalidValue)
-    isempty(mem) && return EncodeError(InsufficientSpace)
+function BitScribbling.codec_try_encode!(output::EncodeOutput, c::Char, ::Latin1)
+    is_latin1(c) || return Invalid()
+    mem = @? reserve_bytes(output, 1)
     mem[1] = codepoint(c) % UInt8
     return 1
 end
 # Pairs of characters, encoded one by one, so an invalid second character is only found
 # after the first is written
-BitScribbling.codec_max_encoded_size(::Type{Tuple{Char, Char}}, ::Latin1) = 2
-function BitScribbling.codec_try_encoded_size(x::Tuple{Char, Char}, e::Latin1)
-    a = @? try_encoded_size(x[1], e)
-    b = @? try_encoded_size(x[2], e)
-    return a + b
+BitScribbling.codec_max_encoded_size(::Type{Tuple{Char, Char}}, ::Latin1) = Val(2)
+function BitScribbling.codec_try_decode(input::DecodeInput, ::Type{Tuple{Char, Char}}, e::Latin1)
+    (a, n, input) = @? decode_field(input, Char, e)
+    (b, m, _) = @? decode_field(input, Char, e)
+    return ((a, b), n + m)
 end
-function BitScribbling.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{Tuple{Char, Char}}, e::Latin1)
-    (a, i) = @? try_decode_next(mem, 1, Char, e)
-    second = try_decode_next(mem, i, Char, e)
-    second isa DecodeError && return DecodeError(Truncated)
-    (b, next) = second
-    return ((a, b), next - 1)
-end
-function BitScribbling.codec_try_encode!(mem::MutableMemoryView{UInt8}, x::Tuple{Char, Char}, e::Latin1)
-    # Nothing may be written when there is too little space, so check it first
-    length(mem) < 2 && return EncodeError(InsufficientSpace)
-    a = @? try_encode!(mem, x[1], e)
-    b = @? try_encode!(mem, 1 + a, x[2], e)
+function BitScribbling.codec_try_encode!(output::EncodeOutput, x::Tuple{Char, Char}, e::Latin1)
+    (a, output) = @? encode_field(output, x[1], e)
+    (b, _) = @? encode_field(output, x[2], e)
     return a + b
 end
 
@@ -346,15 +398,14 @@ struct Even
 end
 for E in (LittleEndian, BigEndian)
     @eval begin
-        BitScribbling.codec_max_encoded_size(::Type{Even}, ::$E) = 1
-        BitScribbling.codec_try_encoded_size(x::Even, ::$E) = iseven(x.x) ? 1 : EncodeError(InvalidValue)
-        function BitScribbling.codec_try_decode(mem::ImmutableMemoryView{UInt8}, ::Type{Even}, ::$E)
-            isempty(mem) && return DecodeError(EndOfInput)
-            return iseven(mem[1]) ? (Even(mem[1]), 1) : DecodeError(InvalidData)
+        BitScribbling.codec_max_encoded_size(::Type{Even}, ::$E) = Val(1)
+        function BitScribbling.codec_try_decode(input::DecodeInput, ::Type{Even}, ::$E)
+            b = @? require_bytes(input, 1)
+            return iseven(b[1]) ? (Even(b[1]), 1) : Invalid()
         end
-        function BitScribbling.codec_try_encode!(mem::MutableMemoryView{UInt8}, x::Even, ::$E)
-            iseven(x.x) || return EncodeError(InvalidValue)
-            isempty(mem) && return EncodeError(InsufficientSpace)
+        function BitScribbling.codec_try_encode!(output::EncodeOutput, x::Even, ::$E)
+            iseven(x.x) || return Invalid()
+            mem = @? reserve_bytes(output, 1)
             mem[1] = x.x
             return 1
         end
@@ -489,7 +540,8 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
             for (e, f) in ((LittleEndian(), bytes_le), (BigEndian(), bytes_be))
                 bytes = f(x)
                 @test max_encoded_size(T, e) == sizeof(T)
-                @test try_encoded_size(x, e) === encoded_size(x, e) === sizeof(T)
+                @test try_encode!(SCRATCH, x, e) === encode!(SCRATCH, x, e) === sizeof(T)
+                @test try_encode!(zeros(UInt8, sizeof(T) - 1), x, e) === EncodeError(InsufficientSpace)
                 buf = zeros(UInt8, sizeof(T) + 3)
                 @test encode!(MemoryView(buf), x, e) == sizeof(T)
                 @test buf[1:sizeof(T)] == bytes
@@ -653,7 +705,7 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         end
         x = Core.Intrinsics.trunc_int(U22, 0x00012345)
         @test_throws ArgumentError encode!(MemoryView(zeros(UInt8, 8)), x, LittleEndian())
-        @test_throws ArgumentError try_encoded_size(x, BigEndian())
+        @test_throws ArgumentError try_encode!(SCRATCH, x, BigEndian())
         @test_throws ArgumentError store(VecWriter(), x, LittleEndian())
         message(T) =
         try
@@ -741,7 +793,12 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
 
         # Encoding
         for c in ['\0', 'a', 'é', '€', '😀', '\xe2', '\xe2\x82', '\xc0\x80', '\ud800', '\xf7\xbf\xbf\xbf']
-            @test try_encoded_size(c, UTF8()) === encoded_size(c, UTF8()) === ncodeunits(c)
+            @test try_encode!(SCRATCH, c, UTF8()) === encode!(SCRATCH, c, UTF8()) === ncodeunits(c)
+            # Scratch memory of exactly the size, or too short
+            n = ncodeunits(c)
+            @test try_encode!(zeros(UInt8, n), c, UTF8()) === n
+            @test try_encode!(zeros(UInt8, n - 1), c, UTF8()) === EncodeError(InsufficientSpace)
+            @test_throws LightBoundsError encode!(zeros(UInt8, n - 1), c, UTF8())
             for len in 0:6
                 buf = fill(0xaa, len)
                 n = try_encode!(MemoryView(buf), c, UTF8())
@@ -775,11 +832,13 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
                 0xe2008200,       # zero byte inside the code units
             )
             c = reinterpret(Char, u)
-            @test try_encoded_size(c, UTF8()) === EncodeError(InvalidValue)
+            @test try_encode!(SCRATCH, c, UTF8()) === EncodeError(InvalidValue)
+            # Unless the scratch memory is too short for any Char
+            @test try_encode!(UInt8[], c, UTF8()) isa EncodeError
             buf = zeros(UInt8, 4)
             @test try_encode!(MemoryView(buf), c, UTF8()) === EncodeError(InvalidValue)
             @test_throws EncodeError encode!(MemoryView(buf), c, UTF8())
-            @test_throws EncodeError encoded_size(c, UTF8())
+            @test_throws EncodeError encode!(SCRATCH, c, UTF8())
         end
         # Every Char that String iteration produces can be encoded, so encoding the Chars
         # of a String gives back its code units, even when it is malformed
@@ -868,17 +927,137 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         @test load_every!(io, MemoryView(dst)[1:3], UTF8()) == 5
         @test dst[1:3] == ['a', 'b', '€']
 
-        # Fixed-size values, and codecs without `codec_bytes_needed`, wait for
-        # `max_encoded_size` bytes
+        # A codec decided by the byte after its encoding waits for that byte, but not more
+        @test load(StallingReader([[0x31, 0x32], [0x20]]), UInt8, Decimal()) === 0x0c
+        @test_throws ErrorException load(StallingReader([[0x31, 0x32]]), UInt8, Decimal())
+        @test load(StallingReader([[0x32, 0x35], [0x35]]), UInt8, Decimal()) === 0xff
+        # At EOF, the buffered digits are the complete input
+        @test load(CursorReader([0x31, 0x32]), UInt8, Decimal()) === 0x0c
+        io = StallingReader([[0x37, 0x20, 0x34, 0x32], [0x20]])
+        dst = zeros(UInt8, 3)
+        @test load_into!(io, MemoryView(dst), Decimal()) == (1, 1)
+        @test dst[1] == 7
+        consume(io, 1) # the space
+        @test load_into!(io, MemoryView(dst), Decimal()) == (1, 2)
+        @test dst[1] == 42
+        @test decode(MemoryView(b"42"), UInt8, Decimal()) === 0x2a
+        @test is_err(try_decode(MemoryView(b"256"), UInt8, Decimal()), InvalidData)
+
+        # Fixed-size values, and codecs that implement `codec_try_decode` without a mode,
+        # wait for `max_encoded_size` bytes
         io = StallingReader([[0x00], [0x01]])
         @test load(io, UInt16, BigEndian()) === 0x0001
         io = StallingReader([[0x61]])
         @test_throws ErrorException load(io, Tuple{Char, Char}, Latin1())
-        @test BitScribbling.codec_bytes_needed(ImmutableMemoryView(UInt8[]), Tuple{Char, Char}, Latin1()) == 2
 
-        # The contract of `codec_bytes_needed`: if the bytes it asks for are there, they
-        # decide the result, whatever follows them.
-        bytes_needed = BitScribbling.bytes_needed
+        # Decode from partial input, with the result as a `DecodeError` like the public
+        # functions give it
+        function partial(bytes, T, e)
+            result = BitScribbling.decode_start(ImmutableMemoryView(bytes), T, e, false)
+            result isa TooShort && return DecodeError(Truncated)
+            result isa Invalid && return DecodeError(InvalidData)
+            return result
+        end
+        is_undecided(result) = result === DecodeError(Truncated)
+        @test is_undecided(partial([0x61], Tuple{Char, Char}, Latin1()))
+        for (T, e) in ((Char, UTF8()), (UInt16, BigEndian()), (Tuple{Bool, UInt32}, BigEndian()), (UInt8, Decimal()))
+            @test partial(UInt8[], T, e) === DecodeError(Truncated)
+            @test try_decode(MemoryView(UInt8[]), T, e) === DecodeError(EndOfInput)
+        end
+
+        # The functions that codecs read their input through. `L` is the number of bytes
+        # the input is known to hold when the codec is compiled.
+        bytes3 = ImmutableMemoryView([0x01, 0x02, 0x03])
+        full = DecodeInput{3}(bytes3, true)
+        complete = DecodeInput{0}(bytes3, true)
+        part = DecodeInput{0}(bytes3, false)
+        empty_complete = DecodeInput{0}(ImmutableMemoryView(UInt8[]), true)
+        empty_partial = DecodeInput{0}(ImmutableMemoryView(UInt8[]), false)
+        for input in (full, complete, part)
+            @test require_bytes(input, 2) == [0x01, 0x02]
+            @test require_bytes(input, 3) == [0x01, 0x02, 0x03]
+            @test isempty(require_bytes(input, 0))
+            @test require_bytes(input, 4) === TooShort(4)
+            @test require_bytes(input, typemax(Int)) === TooShort(typemax(Int))
+            @test_throws ArgumentError require_bytes(input, -1)
+            @test peek_byte(input, 3) === 0x03
+            @test_throws LightBoundsError peek_byte(input, 0)
+        end
+        @test require_bytes(empty_complete, 1) === TooShort(1)
+        @test require_bytes(empty_partial, 1) === TooShort(1)
+        @test peek_byte(complete, 4) === nothing
+        @test peek_byte(full, 4) === nothing
+        @test peek_byte(part, 4) === TooShort(4)
+        @test peek_byte(empty_partial, 1) === TooShort(1)
+        @test peek_byte(empty_complete, 1) === nothing
+
+        (x, n, rest) = decode_field(full, UInt16, BigEndian())
+        @test (x, n) === (0x0102, 2)
+        @test rest isa DecodeInput{1}
+        @test require_bytes(rest, 1) == [0x03]
+        (x, n, rest) = decode_field(complete, UInt16, BigEndian())
+        @test (x, n) === (0x0102, 2)
+        @test rest isa DecodeInput{0}
+        # `TooShort` counts from the start of the input given to the codec, here `complete`
+        @test decode_field(rest, UInt16, BigEndian()) === TooShort(4)
+        (x, n, rest) = decode_field(rest, Char, UTF8())
+        @test (x, n) === ('\x03', 1)
+        @test rest.offset == 3
+        @test decode_field(rest, UInt8, BigEndian()) === TooShort(4)
+        @test decode_field(rest, Char, UTF8()) === TooShort(4)
+        @test require_bytes(rest, 2) === TooShort(5)
+        @test decode_field(empty_partial, UInt8, BigEndian()) === TooShort(1)
+        @test decode_field(DecodeInput{0}(ImmutableMemoryView([0x02]), true), Even, BigEndian()) isa Tuple
+        @test decode_field(DecodeInput{0}(ImmutableMemoryView([0x01]), true), Even, BigEndian()) === Invalid()
+        # Partial input passes on to the rest
+        (_, _, rest) = decode_field(part, UInt16, BigEndian())
+        @test peek_byte(rest, 2) === TooShort(4)
+
+        # The same for outputs
+        out_bytes = zeros(UInt8, 3)
+        full_out = EncodeOutput{3}(MemoryView(out_bytes))
+        short_out = EncodeOutput{0}(MemoryView(out_bytes))
+        for output in (full_out, short_out)
+            @test length(reserve_bytes(output, 2)) == 2
+            @test reserve_bytes(output, 4) === TooShort(4)
+            @test_throws ArgumentError reserve_bytes(output, -1)
+        end
+        (n, rest) = encode_field(full_out, 0x0102, BigEndian())
+        @test n == 2
+        @test rest isa EncodeOutput{1}
+        @test out_bytes[1:2] == [0x01, 0x02]
+        @test encode_field(rest, 0x0102, BigEndian()) === TooShort(4)
+        @test encode_field(rest, 'é', UTF8()) === TooShort(4)
+        @test reserve_bytes(rest, 3) === TooShort(5)
+        @test encode_field(rest, Even(0x01), BigEndian()) === Invalid()
+        (n, rest) = encode_field(rest, 'a', UTF8())
+        @test n == 1
+        @test out_bytes == [0x01, 0x02, 0x61]
+        @test encode_field(short_out, 0x01020304, BigEndian()) === TooShort(4)
+
+        # A reader buffers the bytes that a codec asks for at once, rather than one by one
+        bytes = vcat(0xc8, fill(0x01, 200))
+        PREFIXED_CALLS[] = 0
+        @test load(ChunkedReader([[b] for b in bytes]), UInt64, Prefixed()) === UInt64(200)
+        @test PREFIXED_CALLS[] ≤ 4
+        PREFIXED_CALLS[] = 0
+        @test load(StallingReader([bytes[1:1], bytes[2:end]]), UInt64, Prefixed()) === UInt64(200)
+        @test PREFIXED_CALLS[] ≤ 4
+        # A reader that ends early
+        @test try_load(CursorReader(bytes[1:100]), UInt64, Prefixed()) === DecodeError(Truncated)
+
+        # A codec that reads more than `max_encoded_size` bytes breaks its contract: it
+        # can't, since the input ends after them
+        @test_throws ErrorException try_decode(MemoryView(zeros(UInt8, 10)), UInt8, Greedy())
+        @test_throws ErrorException try_load(CursorReader(zeros(UInt8, 10)), UInt8, Greedy())
+        @test_throws ErrorException try_load(StallingReader([[0x00], [0x00]]), UInt8, Greedy())
+        @test_throws ErrorException try_encode!(MemoryView(zeros(UInt8, 10)), 0x00, Greedy())
+        # With less than `max_encoded_size` bytes, `TooShort` is allowed
+        @test try_decode(MemoryView([0x00]), UInt8, Greedy()) === DecodeError(Truncated)
+        @test try_encode!(MemoryView([0x00]), 0x00, Greedy()) === EncodeError(InsufficientSpace)
+
+        # The contract for partial input: a decided result is the result for every input
+        # that starts with the bytes, and `max_encoded_size` bytes always decide it
         for (T, e) in CODEC_CASES
             m = max_encoded_size(T, e)
             for len in 0:(m + 1), _ in 1:20
@@ -889,24 +1068,32 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
                     bytes = [rand() < 0.7 ? rand(0x80:0xbf) : b for b in bytes]
                     len > 0 && (bytes[1] = rand((0x41, 0xc3, 0xe2, 0xf0, 0x80, 0xff)))
                 end
-                expected = try_decode_n(MemoryView(bytes), T, e)
                 for l in 0:len
-                    k = bytes_needed(ImmutableMemoryView(bytes[1:l]), T, e)
-                    @test 0 ≤ k ≤ m
-                    k ≤ l || continue
-                    @test isequal(try_decode_n(MemoryView(bytes[1:k]), T, e), expected)
-                    @test isequal(try_decode_n(MemoryView(vcat(bytes[1:k], 0x80, 0x41)), T, e), expected)
+                    prefix = bytes[1:l]
+                    result = partial(prefix, T, e)
+                    # Where partial input ends is not known
+                    @test !isequal(result, DecodeError(EndOfInput))
+                    if is_undecided(result)
+                        @test l < m
+                        continue
+                    end
+                    @test isequal(result, try_decode_n(MemoryView(prefix), T, e))
+                    @test isequal(result, try_decode_n(MemoryView(bytes), T, e))
+                    @test isequal(result, try_decode_n(MemoryView(vcat(prefix, 0x80, 0x41)), T, e))
                 end
             end
         end
-        # For UTF-8, exactly the bytes of the character, and the byte that ends it early
-        @test bytes_needed(ImmutableMemoryView(UInt8[]), Char, UTF8()) == 1
-        @test bytes_needed(ImmutableMemoryView([0x61, 0x80]), Char, UTF8()) == 1
-        @test bytes_needed(ImmutableMemoryView([0xe2]), Char, UTF8()) == 2
-        @test bytes_needed(ImmutableMemoryView([0xe2, 0x82]), Char, UTF8()) == 3
-        @test bytes_needed(ImmutableMemoryView([0xe2, 0x82, 0xac]), Char, UTF8()) == 3
-        @test bytes_needed(ImmutableMemoryView([0xe2, 0x41]), Char, UTF8()) == 2
-        @test bytes_needed(ImmutableMemoryView([0xf0, 0x9f, 0x98, 0x80]), Char, UTF8()) == 4
+        # For UTF-8, the bytes of the character decide it, or the byte that ends it early
+        decided_at(bytes) = findfirst(l -> !is_undecided(partial(bytes[1:l], Char, UTF8())), 0:length(bytes))
+        decided_length(bytes) = (i = decided_at(bytes); i === nothing ? nothing : i - 1)
+        @test decided_length(UInt8[]) === nothing
+        @test decided_length([0x61, 0x80]) == 1
+        @test decided_length([0xe2]) === nothing
+        @test decided_length([0xe2, 0x82]) === nothing
+        @test decided_length([0xe2, 0x82, 0xac]) == 3
+        @test decided_length([0xe2, 0x41]) == 2
+        @test decided_length([0xf0, 0x9f, 0x98, 0x80]) == 4
+        @test partial([0xe2, 0x41], Char, UTF8()) === ('\xe2', 1)
     end
 
     @testset "try_load / load" begin
@@ -1381,9 +1568,9 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
                     @test try_encode!(MemoryView(a), i, x, e) == try_encode!(MemoryView(b)[i:end], x, e)
                     @test a == b
                     @test all(==(0xaa), a[1:(i - 1)])
-                    # With `max_encoded_size` bytes, encoding succeeds, and writes
-                    # `encoded_size` bytes
-                    @test try_encode!(MemoryView(zeros(UInt8, m)), x, e) === try_encoded_size(x, e)
+                    # With `max_encoded_size` bytes, encoding succeeds, and writes the
+                    # same number of bytes as into longer memory
+                    @test try_encode!(MemoryView(zeros(UInt8, m)), x, e) === try_encode!(SCRATCH, x, e)
                 end
             end
         end
@@ -1537,11 +1724,11 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         encode_inbounds!(mem, i, x, e) = @inbounds encode!(mem, i, x, e)
         @test max_encoded_size(Char, Latin1()) == 1
         for c in ('a', 'é', '\u00ff')
-            @test try_encoded_size(c, Latin1()) === encoded_size(c, Latin1()) === 1
+            @test try_encode!(SCRATCH, c, Latin1()) === encode!(SCRATCH, c, Latin1()) === 1
         end
         for c in ('λ', '€', '\u0100', '\xff', '\ud800')
-            @test try_encoded_size(c, Latin1()) === EncodeError(InvalidValue)
-            @test_throws EncodeError(InvalidValue) encoded_size(c, Latin1())
+            @test try_encode!(SCRATCH, c, Latin1()) === EncodeError(InvalidValue)
+            @test_throws EncodeError(InvalidValue) encode!(SCRATCH, c, Latin1())
             for len in 0:2
                 buf = fill(0xaa, len)
                 @test try_encode!(MemoryView(buf), c, Latin1()) === EncodeError(InvalidValue)
@@ -1601,18 +1788,18 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         # `max_encoded_size` bytes
         T = Tuple{Char, Char}
         @test max_encoded_size(T, Latin1()) == 2
-        @test try_encoded_size(('a', 'b'), Latin1()) === 2
-        @test try_encoded_size(('a', 'λ'), Latin1()) === EncodeError(InvalidValue)
-        @test try_encoded_size(('λ', 'a'), Latin1()) === EncodeError(InvalidValue)
+        @test try_encode!(SCRATCH, ('a', 'b'), Latin1()) === 2
+        @test try_encode!(SCRATCH, ('a', 'λ'), Latin1()) === EncodeError(InvalidValue)
+        @test try_encode!(SCRATCH, ('λ', 'a'), Latin1()) === EncodeError(InvalidValue)
         buf = fill(0xaa, 5)
         @test try_encode!(MemoryView(buf), 2, ('a', 'λ'), Latin1()) === EncodeError(InvalidValue)
         @test buf == [0xaa, 0x61, 0xaa, 0xaa, 0xaa]
         @test_throws EncodeError(InvalidValue) encode!(MemoryView(buf), 2, ('b', 'λ'), Latin1())
-        # ... but not when there is too little space
+        # When there is too little space, only bytes the encoding would cover are written
         buf = fill(0xaa, 3)
         @test try_encode!(MemoryView(buf), 3, ('a', 'b'), Latin1()) === EncodeError(InsufficientSpace)
         @test_throws LightBoundsError encode!(MemoryView(buf), 3, ('a', 'b'), Latin1())
-        @test buf == fill(0xaa, 3)
+        @test buf[1:2] == fill(0xaa, 2)
         @test encode!(MemoryView(buf), 2, ('a', 'b'), Latin1()) === 2
         @test decode(MemoryView(buf), 2, T, Latin1()) === ('a', 'b')
         # Bytes written for an invalid value are not stored
@@ -1783,7 +1970,7 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
             bytes = encoding(x, e)
             @test bytes == reduce(vcat, (encoding(y, e) for y in x))
             @test max_encoded_size(T, e) == sum(y -> max_encoded_size(typeof(y), e), x) == length(bytes)
-            @test try_encoded_size(x, e) == length(bytes)
+            @test try_encode!(SCRATCH, x, e) == length(bytes)
             @test try_decode_n(MemoryView([bytes; 0xff]), T, e) === (x, length(bytes))
             @test load(CursorReader(bytes), T, e) === x
             # Loading waits for the bytes it needs
@@ -1796,9 +1983,10 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
             @test is_err(try_decode(UInt8[], T, e), EndOfInput)
             for len in 1:(length(bytes) - 1)
                 @test is_err(try_decode(bytes[1:len], T, e), Truncated)
-                buf = fill(0xaa, len)
-                @test try_encode!(buf, x, e) === EncodeError(InsufficientSpace)
-                @test all(==(0xaa), buf)
+                # Bytes beyond `buf` would have been written, so it's all unspecified
+                buf = fill(0xaa, len + 1)
+                @test try_encode!(view(buf, 1:len), x, e) === EncodeError(InsufficientSpace)
+                @test buf[end] == 0xaa
             end
             # Bulk
             xs = fill(x, 5)
@@ -1826,8 +2014,12 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
             @test is_err(try_decode([0x01, 0x00, 0x00, 0x00, 0x02], Tuple{UInt32, Bool}, e), InvalidData)
             # A later invalid element is only found after the earlier ones are decoded
             @test is_err(try_decode([0x01], Tuple{UInt32, Bool}, e), Truncated)
-            @test try_encoded_size((0x01, Even(0x03)), e) == EncodeError(InvalidValue)
+            @test try_encode!(SCRATCH, (0x01, Even(0x03)), e) == EncodeError(InvalidValue)
             @test try_encode!(zeros(UInt8, 2), (0x01, Even(0x03)), e) == EncodeError(InvalidValue)
+            # Only the first `max_encoded_size` bytes may be written on errors
+            buf = fill(0xaa, 6)
+            @test try_encode!(buf, 2, (0x01, Even(0x03)), e) == EncodeError(InvalidValue)
+            @test buf[[1, 4, 5, 6]] == fill(0xaa, 4)
             @test_throws EncodeError(InvalidValue) store(VecWriter(), (0x01, Even(0x03)), e)
             # Either error kind may be returned if both apply
             @test try_encode!(zeros(UInt8, 1), (0x01, Even(0x03)), e) isa EncodeError
@@ -1949,7 +2141,7 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
         decode_inbounds(mem, ::Type{T}, e) where {T} = @inbounds decode(mem, T, e)
         encode_inbounds!(mem, x, e) = @inbounds encode!(mem, x, e)
         mem = MemoryView(zeros(UInt8, 10))
-        for T in (Int8, Int16)
+        for T in (Int8, Int16, UInt8, UInt16)
             @test_throws ErrorException try_decode(mem, T, Liar())
             @test_throws ErrorException try_decode_next(mem, 1, T, Liar())
             @test_throws ErrorException decode_inbounds(mem, T, Liar())
@@ -1971,10 +2163,14 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
             @test_throws ErrorException store_all(io, MemoryView(zeros(T, 3)), Liar())
             @test isempty(io.vec)
         end
-        # Only counts outside `mem` are caught
-        @test try_decode_next(mem, 1, UInt8, Liar()) === (0x00, 4)
-        @test try_encode!(mem, 0x00, Liar()) === 3
+        # Counts beyond `max_encoded_size` are caught, since the input and output end there
         @test_throws ErrorException try_decode(MemoryView(zeros(UInt8, 2)), UInt8, Liar())
+        @test_throws ErrorException try_encode!(MemoryView(zeros(UInt8, 2)), 0x00, Liar())
+        # Also on the slow path, where the input or output is shorter
+        @test_throws ErrorException try_decode(MemoryView(zeros(UInt8, 1)), UInt16, Liar())
+        @test_throws ErrorException try_encode!(MemoryView(zeros(UInt8, 1)), 0x0000, Liar())
+        # A `codec_max_encoded_size` that doesn't return a positive `Val`
+        @test_throws ErrorException max_encoded_size(Int32, Liar())
         msg = try
             try_decode(mem, Int16, Liar())
         catch e
@@ -2105,7 +2301,7 @@ const ELIDES_BOUNDSCHECKS = Base.JLOptions().check_bounds != 1
             w2 = VecWriter()
             @test M.store(w1, 0x0102) == store(w2, 0x0102, E)
             @test M.try_store(w1, 0x0304) === try_store(w2, 0x0304, E) === 2
-            @test M.try_encoded_size(0x0102) === M.encoded_size(0x0102) === 2
+            @test M.try_encode!(SCRATCH, 0x0102) === M.encode!(SCRATCH, 0x0102) === 2
             @test M.store_every(w1, MemoryView(UInt16[1, 2])) == store_every(w2, MemoryView(UInt16[1, 2]), E)
             @test w1.vec == w2.vec
             d1 = zeros(UInt16, 3)
