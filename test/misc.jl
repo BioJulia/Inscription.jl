@@ -75,7 +75,7 @@ end
     decode_inbounds(mem, ::Type{T}, e) where {T} = @inbounds decode(mem, T, e)
     encode_inbounds!(mem, x, e) = @inbounds encode!(mem, x, e)
     mem = MemoryView(zeros(UInt8, 10))
-    for T in (Int8, Int16, UInt8, UInt16)
+    for T in (Int8, Int16, Int64, UInt8, UInt16)
         @test_throws ErrorException try_decode(mem, T, Liar())
         @test_throws ErrorException try_decode_next(mem, 1, T, Liar())
         @test_throws ErrorException decode_inbounds(mem, T, Liar())
@@ -112,6 +112,11 @@ end
     end
     @test occursin("`codec_try_decode` for `Int16` with `Liar()` broke its contract", msg)
     @test occursin("byte count of -1", msg)
+    # A count of zero is caught also on the slow path, and when loading from an empty
+    # reader, where the codec is called to learn how many bytes to buffer
+    @test_throws ErrorException try_decode(MemoryView(zeros(UInt8, 1)), Int64, Liar())
+    @test_throws ErrorException try_encode!(MemoryView(zeros(UInt8, 1)), Int64(0), Liar())
+    @test_throws ErrorException try_load(CursorReader(UInt8[]), Int64, Liar())
 end
 
 @testset "Memory-like arguments" begin

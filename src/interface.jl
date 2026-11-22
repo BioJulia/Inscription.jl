@@ -723,9 +723,10 @@ end
 
 ## Checked rules
 The rules are not checked, with one exception: an `ErrorException` is thrown if the
-returned byte count is not in `0:length(mem)`, also in an `@inbounds` context. This is
+returned byte count is not in `1:length(mem)`, also in an `@inbounds` context. This is
 because the byte count is used to consume bytes from writers, so a codec that broke its
-contract in this way would otherwise corrupt memory.
+contract in this way would otherwise corrupt memory, or, by returning zero, make loops
+that decode or encode until the end of the data never end.
 """
 function codec_try_encode! end
 
@@ -791,13 +792,12 @@ end
     result = codec_try_decode(input, T, enc)
     result isa Union{TooShort, Invalid} && return result
     (x, n) = result
-    # Check only what keeps a broken codec from causing undefined behaviour, namely that
-    # `n` is in `0:length(input.mem)`. Since the input ends after `max_encoded_size`
-    # bytes, this also checks that `n` is at most that. LLVM often removes this check,
-    # when the codec has checked the length itself. Its other contract violations are its
-    # own bugs, and are not caught here.
+    # Check only what keeps a broken codec from causing undefined behaviour or endless
+    # loops, see `valid_count`. LLVM often removes this check, when the codec has checked
+    # the length itself. Its other contract violations are its own bugs, and are not
+    # caught here.
     len = length(input.mem)
-    (n % UInt) ≤ (len % UInt) || throw_count_error(codec_try_decode, T, enc, n, len)
+    valid_count(n, len) || throw_count_error(codec_try_decode, T, enc, n, len)
     return (x, n)
 end
 
@@ -808,19 +808,26 @@ end
     scheme isa Proxy && return proxy_try_encode!(output, x, scheme, enc)
     n = codec_try_encode!(output, x, enc)
     n isa Union{TooShort, Invalid} && return n
-    # Check only what keeps a broken codec from causing undefined behaviour, see
-    # `call_codec_try_decode`.
+    # Check only what keeps a broken codec from causing undefined behaviour or endless
+    # loops, see `call_codec_try_decode`.
     len = length(output.mem)
-    (n % UInt) ≤ (len % UInt) || throw_count_error(codec_try_encode!, T, enc, n, len)
+    valid_count(n, len) || throw_count_error(codec_try_encode!, T, enc, n, len)
     return n
 end
+
+# Whether the byte count `n` returned by a codec for memory of length `len` is in
+# `1:len`. A count above `len` would make callers read or consume bytes beyond the
+# memory. Since the input or output ends after `max_encoded_size` bytes, this also checks
+# that `n` is at most that. A count of zero would make loops that decode or encode until
+# the end of the data never end. One comparison checks both bounds.
+@inline valid_count(n::Int, len::Int) = ((n - 1) % UInt) < (len % UInt)
 
 # Outlined, and given the length rather than `mem`, so the error path doesn't make `mem`
 # escape, see `check_start_index`.
 @noinline function throw_count_error(f, ::Type{T}, enc::Encoding, n, mem_length::Int) where {T}
     return error(
         "`$(nameof(f))` for `$T` with `$enc` broke its contract: it returned a byte count " *
-            "of $n, which is not in 0:length(mem), where length(mem) == $mem_length"
+            "of $n, which is not in 1:length(mem), where length(mem) == $mem_length"
     )
 end
 

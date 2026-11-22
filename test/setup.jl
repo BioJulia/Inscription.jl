@@ -156,13 +156,16 @@ end
 
 # A codec that breaks its contract, by returning byte counts out of range
 struct Liar <: Encoding end
-BitScribbling.codec_max_encoded_size(::Type{<:Union{Int8, Int16, UInt8, UInt16}}, ::Liar) = Val(2)
+BitScribbling.codec_max_encoded_size(::Type{<:Union{Int8, Int16, Int64, UInt8, UInt16}}, ::Liar) = Val(2)
 # More bytes than the input has, which ends after `max_encoded_size` bytes
 BitScribbling.codec_try_decode(::DecodeInput, ::Type{Int8}, ::Liar) = (Int8(0), 3)
 BitScribbling.codec_try_encode!(output::EncodeOutput, ::Int8, ::Liar) = length(output.mem) + 1
 # A negative count
 BitScribbling.codec_try_decode(::DecodeInput, ::Type{Int16}, ::Liar) = (Int16(0), -1)
 BitScribbling.codec_try_encode!(::EncodeOutput, ::Int16, ::Liar) = -1
+# Zero, which would make loops until the end of the data never end
+BitScribbling.codec_try_decode(::DecodeInput, ::Type{Int64}, ::Liar) = (Int64(0), 0)
+BitScribbling.codec_try_encode!(::EncodeOutput, ::Int64, ::Liar) = 0
 # More bytes than `max_encoded_size`. The input and output end after `max_encoded_size`
 # bytes, so this is caught.
 BitScribbling.codec_try_decode(::DecodeInput, ::Type{UInt8}, ::Liar) = (0x00, 3)
