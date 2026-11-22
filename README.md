@@ -5,20 +5,54 @@
 [![Documentation](https://img.shields.io/badge/docs-dev-blue.svg)](https://biojulia.github.io/BitScribbling.jl/dev)
 [![](https://codecov.io/gh/BioJulia/BitScribbling.jl/branch/master/graph/badge.svg)](https://codecov.io/gh/BioJulia/BitScribbling.jl)
 
-BitScribbling encodes and decodes values of bits types, such as integers, floats, `Char`
-and isbits structs, to and from bytes, either in memory (as `MemoryView`s) or by loading
-and storing them from and to the buffered IO types of
-[BufferIO.jl](https://github.com/BioJulia/BufferIO.jl).
+BitScribbling.jl provides abstractions for reading and writing values to byte arrays (via [MemoryViews.jl](https://github.com/BioJulia/MemoryViews.jl).jl) or I/O (via [BufferIO.jl](https://github.com/BioJulia/BufferIO.jl).jl).
 
+It can be considered a more powerful version of Base's `read(::IO, T)`, `write(::IO, ::T)` as well as `unsafe_load`/`unsafe_store!`.
+Alternatively, it can be viewed as an extension of BufferIO.jl, which only supports IO on bytes, to support IO for all types.
+
+You might want to use this package if you find yourself:
+* Using `unsafe_load`, `unsafe_store!` a lot,
+* Care about how much `write(::IO, ::Float32)` allocates,
+* Find yourself writing non-`UInt8` data into `Vector{UInt8}`s for IO performance reasons.
+
+The major design goals of this package are:
+1. High performance. The abstractions of this package should be roughly on par with manual implementations using pointer operations and `reinterpret`. Users should rarely be discouraged from using BitScribbling abstractions due to performance.
+2. Present a hard-to-misuse API. BitScribbling APIs avoid making important behaviour implicit, such as platform endianness, platform-dependent struct padding, or performance traps due to slow fallback definitions. It attempts to guide users away from bugs.
+
+Explicit **non**-goals of this package are:
+1. A simple API. This package prefers semantically consistent, precise, efficient, and hard-to-misuse APIs over easy APIs.
+2. Reading/writing any type automatically via introspection, like Serialization.jl does
+3. Reading/writing nested types like nested dicts, common in e.g. JSON, TOML and BSON formats.
+4. Support for any specific format like JSON or CSV. Instead, this package is for generic I/O of individual values, and can be used to implement formats.
+
+## Example
 ```julia
-using BitScribbling
-using MemoryViews: MemoryView
+# Explicitly opt-into little endian encodings/decodings
+using BufferIO, BitScribbling.Little
 
-buf = zeros(UInt8, 4)
-encode!(MemoryView(buf), 0x01020304, BigEndian())
-buf == [0x01, 0x02, 0x03, 0x04] # true
-decode(MemoryView(buf), UInt32, BigEndian()) # 0x01020304
+data = UInt8.('a':'z')
+u16s = zeros(UInt16, 50)
+
+# Load from an AbstractBufReader:
+rdr = CursorReader(data)
+u32 = load(rdr, UInt32) # one value
+(n_u16s_loaded, _) = load_all!(rdr, u16s) # many values
+
+# Or, load from an array
+u32 = decode(data, UInt32)
+
+# Store into a writer
+wtr = VecWriter()
+store(wtr, u32)
+
+# Store into a byte array
+n_u16s_written = encode_all!(data, view(u16s, 1:n_u16s_loaded))
 ```
+
+## Comparison to other packages
+* **JSON.jl / TOML/jl / BSON/jl**: BitScribbling.jl is lower level, in that it attempts only to read/write individual values, typically `isbits` values. BitScribbling.jl would typically be used to implement binary formats like BSON or BAM.
+* **BufferIO.jl**: models I/O via buffers of bytes (`UInt8`), and is more low level. BitScribbling.jl builds on, and depends on BufferIO.jl, and extends an analogous model of I/O for non-`UInt8` types
+* **Serialization.jl** specifies a specific format, whereas BitScribbling.jl is format agnostic. Also, Serialization.jl works with any Julia type, whereas reading/writing must be implemented per type in BitScribbling.jl's abstractions.
 
 ## Contributing
 We appreciate contributions from users including reporting bugs, fixing
