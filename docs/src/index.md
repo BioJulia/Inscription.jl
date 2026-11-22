@@ -6,8 +6,8 @@ end
 ```
 
 # BitScribbling.jl
-BitScribbling.jl provides binary I/O interfaces, used for reading and writing `isbits` values to and from
-byte arrays (via MemoryViews.jl) and I/O objects (via BufferIO.jl).
+BitScribbling.jl provides binary I/O interfaces, used for reading and writing values whose encodings have a bounded size
+to and from byte arrays (via MemoryViews.jl) and I/O objects (via BufferIO.jl).
 
 Its design is guided by two principles:
 1. Low overhead: BitScribbling abstractions should be roughly as fast as a
@@ -40,11 +40,11 @@ BitScribbling.jl builds on BufferIO.jl and depends on it.
 These packages implement specific formats, whereas BitScribbling.jl provides abstractions for
 binary I/O *in general*.
 Also, the formats of these packages support variable-length containers and nested types such
-as mappings and arrays, whereas BitScribbling.jl only supports bitstypes.
+as mappings and arrays, whereas BitScribbling.jl only supports encodings with a bounded size.
 
 #### Serialization.jl
 Serialization.jl can read and write any Julia value, including recursive types, and types with references
-like `Dict` and `Array`, whereas BitScribbling.jl only supports bitstypes.
+like `Dict` and `Array`, whereas BitScribbling.jl only supports encodings with a bounded size.
 Also, Serialization.jl functions work for all types without specifying how to implement them, whereas
 BitScribbling.jl requires users to specify how each type should be serialized and deserialized.
 The latter is what makes BitScribbling.jl format-agnostic.
@@ -56,6 +56,8 @@ BitScribbling.jl is more fundamental, in the sense that it could be used to impl
   Users can opt-in to padding to e.g. read/write an 18-bit primitive value as 24 bits (3 whole bytes).
   See the [Implementing a type](custom.md) page for details.
 
-* BitScribbling.jl only supports `isbits` types, and discourages reading and writing `Ptr`.
+* BitScribbling.jl only supports encodings with a bounded size, given by [`max_encoded_size`](@ref).
+  The type needn't be a bitstype, but values like `BigInt`, `String` or `Vector`, whose
+  encodings can be arbitrarily large, are not supported. It also discourages reading and writing `Ptr`.
 
 * BitScribbling.jl requires Julia 1.11 or newer.

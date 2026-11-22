@@ -45,7 +45,8 @@ Most types can probably derive the codec this way. See the diagram below for an 
 and the sections below for more details.
 
 If the bits kind is `Opaque()`, this means the codec has to be manually implemented,
-as described above. That is always a valid option for any bitstype.
+as described above. That is always a valid option for any type whose encodings have a
+bounded size, also for types that are not bitstypes.
 
 ## Visual guide
 ![Guide to implementing a codec](assets/types.svg)

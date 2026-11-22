@@ -1,8 +1,8 @@
 """
     module BitScribbling
 
-Encode and decode values of bitstypes, i.e. types for which `isbitstype` is true, to
-and from byte arrays and BufferIO's IO types.
+Encode and decode values whose encodings have a bounded size, such as integers, floats,
+`Char` and structs, to and from byte arrays and BufferIO's IO types.
 """
 module BitScribbling
 

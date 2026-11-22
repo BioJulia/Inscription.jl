@@ -1,8 +1,10 @@
 """
     abstract type Encoding end
 
-`Encoding` are zero-sized trait structs used to signal how one `isbits` value
+`Encoding` are zero-sized trait structs used to signal how one value
 of a given type `T` is encoded to bytes, and decoded from bytes.
+`T` needn't be a bitstype, but every encoding of a `T` must have a size of at most
+[`max_encoded_size(T, enc)`](@ref max_encoded_size) bytes.
 Thus, reading and writing behaviour is governed by the pair `(T, enc::Encoding)`.
 Such an implementation over a pair is called a "codec".
 Given a single implementation of a codec, encoding, and decoding to and from `MemoryView`,
