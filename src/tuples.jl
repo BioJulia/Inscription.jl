@@ -1,11 +1,11 @@
 # Tuples with the byte-order encodings. A tuple is encoded as the encodings of its
 # elements, one after another, without padding.
 #
-# If the tuple type satisfies the requirements of a bits struct, see `BitsKind`, that is
-# its memory representation, up to byte order. Then it is a bits type: `BitsLoadable` if
-# all its element types are, else `BitsStorable` if none is `Opaque`. Otherwise, e.g. if
-# it has padding in memory, or an element type has a hand-written codec, it is `Opaque`,
-# and the codec below encodes its elements one by one. Since the requirements are checked
+# If the tuple type satisfies the requirements of a bits struct, see `BitsLoadable`, that
+# is its memory representation, up to byte order. Then it is a bits type: `BitsLoadable`
+# if all its element types are, else `BitsStorable` if all are bits types. Otherwise, e.g.
+# if it has padding in memory, or an element type has a hand-written codec or a proxy, it
+# is `Manual`, and the codec below encodes its elements one by one. Since the requirements are checked
 # against the strictest layout of any platform, which one applies is the same on every
 # platform.
 #
@@ -15,22 +15,22 @@
 # element decides the result, so the same input may give `InvalidData`, and a load does
 # not wait for the rest of the tuple.
 
-bits_kind(::Type{T}) where {T <: Tuple} = tuple_bits_kind(T)
+codec_scheme(::Type{T}, enc::Endianness) where {T <: Tuple} = tuple_scheme(T, enc)
 
-# `bits_type_error` checks the kinds of the elements, and the layout. It is constant-
-# folded if the `bits_kind` methods of the elements are foldable, and so is this.
-function tuple_bits_kind(::Type{T})::BitsKind where {T}
-    isbitstype(T) || return Opaque()
-    bits_type_error(T, BitsLoadable()) === nothing && return BitsLoadable()
-    bits_type_error(T, BitsStorable()) === nothing && return BitsStorable()
-    return Opaque()
+# `bits_type_error` checks the schemes of the elements, and the layout. It is constant-
+# folded if the `codec_scheme` methods of the elements are foldable, and so is this.
+function tuple_scheme(::Type{T}, enc::Endianness)::CodecScheme where {T}
+    isbitstype(T) || return Manual()
+    bits_type_error(T, BitsLoadable(), enc) === nothing && return BitsLoadable()
+    bits_type_error(T, BitsStorable(), enc) === nothing && return BitsStorable()
+    return Manual()
 end
 
 # A `BitsStorable` tuple has no invariants beyond those of its elements, which are
 # checked before this is called.
 is_valid_bits(::Type{<:Tuple}, ::NTuple{N, UInt8}) where {N} = true
 
-# The codec of `Opaque` tuples. Its methods are generated from the element types, so they
+# The codec of `Manual` tuples. Its methods are generated from the element types, so they
 # are unrolled and type stable. The generators only use the element types, not methods
 # that may be added later.
 for E in (LittleEndian, BigEndian)

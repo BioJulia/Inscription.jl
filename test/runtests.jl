@@ -2,7 +2,7 @@ using Test
 using Aqua: Aqua
 using BitScribbling
 using BitScribbling: DecodeErrorKinds, EncodeErrorKinds, Little, Big
-using BitScribbling: bits_kind, BitsLoadable, BitsStorable, Opaque, is_valid_bits, as_unsigned
+using BitScribbling: codec_scheme, BitsLoadable, BitsStorable, Manual, Proxy, is_valid_bits, as_unsigned
 using BitScribbling: DecodeInput, EncodeOutput, TooShort, Invalid, require_bytes, peek_byte, decode_field, reserve_bytes, encode_field
 using BitScribbling.DecodeErrorKinds: EndOfInput, Truncated, InvalidData, TrailingData
 using BitScribbling.EncodeErrorKinds: InsufficientSpace, InvalidValue
@@ -22,6 +22,7 @@ include("setup.jl")
     include("bulk.jl")
     include("memory.jl")
     include("types.jl")
+    include("proxy.jl")
     include("misc.jl")
 
     @testset "Aqua" begin

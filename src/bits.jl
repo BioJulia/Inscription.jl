@@ -1,95 +1,9 @@
 """
-    abstract type BitsKind end
-
-Zero-sized trait struct. 
-By implementing the `BitScribbling.bits_kind(::Type{T})` function for your type `T`,
-you can automatically generate a codec for `T` the [`LittleEndian`](@ref)
-and [`BigEndian`](@ref) ("endian") encodings.
-
-Currently, the options are [`BitsLoadable`](@ref), [`BitsStorable`](@ref) and [`Opaque`](@ref).
-
-Implement with e.g. `BitScribbling.bits_kind(::Type{MyType}) = BitScribbling.BitsStorable()`.
-Defaults to [`Opaque`](@ref), where no implementation is auto-generated.
-
-If `isbitstype(T)`,
-and `T` has a bit-size a multiple of 8 (i.e. occupies an integer number of bytes), 
-and the little/big endian encoding of `T` is identical to the in-memory representation
-of `T`, then `bits_kind(T)` can be `BitsLoadable` or `BitsStorable`.
-Else, it must remain `Opaque`.
-
-If all bitpatterns are valid, it can be `BitsLoadable`. Then, encoding, decoding, storing
-and loading is automatically implemented as simply copying bytes in memory.
-Examples of this include `UInt64` and `Float32`.
-
-Else, if some bitpatterns are invalid, it can be `BitsStorable`. Then, the type also can be
-encoded, decoded, loaded and stored by copying bytes directly, but after decoding or loading,
-the bytes must be validated with [`is_valid_bits`](@ref), which then must be implemented.
-
-See also: [`is_valid_bits`](@ref)
-
-# Extended help
-## Structs
-An `isbitstype` struct `T` has three requirements to be `BitsLoadable` or `BitsStorable`,
-in addition to the above requrement that its encoding must equal its memory representation:
-
-1. All its fields must be `BitsLoadable` for `T` to be `BitsLoadable`, and its fields must
-   be `BitsLoadable` or `BitsStorable` for `T` to be `BitsStorable`
-2. `T` must not have size zero
-3. `T` must have no padding on any platform. The padding check is done by assuming
-   the alignment of any primitive is equal to the next power of two equal to or
-   larger than its bitsize,
-   and that the alignment of any struct is equal to its largest field.
-   This is the most conservative possible rule.
-"""
-abstract type BitsKind end
-
-"""
-    BitsLoadable() <: BitsKind
-
-Zero-sized trait. See See [`BitsKind`](@ref) for details.
-"""
-struct BitsLoadable <: BitsKind end
-
-"""
-    BitsStorable() <: BitsKind
-
-Zero-sized trait. See See [`BitsKind`](@ref) for details.
-"""
-struct BitsStorable <: BitsKind end
-
-"""
-    Opaque() <: BitsKind
-
-Zero-sized trait. See See [`BitsKind`](@ref) for details.
-"""
-struct Opaque <: BitsKind end
-
-"""
-    bits_kind(::Type{T})::BitsKind
-
-Compute the `BitsKind` instance of `T`. This method should be constant foldable.
-
-See also: [`BitsKind`](@ref)
-"""
-bits_kind(::Type)::BitsKind = Opaque()
-
-bits_kind(
-    ::Union{
-        Type{Int8}, Type{Int16}, Type{Int32}, Type{Int64}, Type{Int128},
-        Type{UInt8}, Type{UInt16}, Type{UInt32}, Type{UInt64}, Type{UInt128},
-        Type{Float16}, Type{Float32}, Type{Float64},
-    }
-) = BitsLoadable()
-
-bits_kind(::Type{Bool}) = BitsStorable()
-bits_kind(::Type{<:Enum}) = BitsStorable()
-
-"""
     is_valid_bits(::Type{T}, bytes::NTuple{N, UInt8})::Bool
 
 Whether the bytes `bytes` are a valid `T`, for a type `T`.
-This function is only called for types for which `bits_kind(T) === BitsStorable()`,
-see [`BitsKind`](@ref).
+This function is only called for types whose [`codec_scheme`](@ref) is
+[`BitsStorable()`](@ref BitsStorable).
 
 `N` is the number of bytes of `T`.
 The bytes are in given in native byte order, i.e. after any potential byte swapping.
@@ -193,23 +107,6 @@ function uint_of_size(n::Int)::Type{<:Unsigned}
     end
 end
 
-# The kind of the codec for T with the encoding `enc`. `Opaque` means a hand-written
-# codec, which every encoding other than the byte orders requires.
-# Throw an `ArgumentError` if T is declared to be a bits type, but can't be one.
-# The check is constant-folded, so this costs nothing at runtime.
-@inline function codec_kind(::Type{T}, enc::Encoding)::BitsKind where {T}
-    enc isa Endianness || return Opaque()
-    kind = bits_kind(T)::BitsKind
-    kind isa Opaque && return kind
-    message = bits_type_error(T, kind)
-    message === nothing || throw_bits_type_error(message)
-    return kind
-end
-
-@noinline throw_bits_type_error(message::Tuple) = throw(ArgumentError(string(message...)))
-
-kind_name(kind::BitsKind) = nameof(typeof(kind))
-
 # The alignment of the bits type T in the strictest layout that any platform could give
 # it, in which every primitive type is aligned to its size. The primitive fields of a
 # struct must have been checked to have bit widths that are powers of two.
@@ -230,21 +127,23 @@ else
     bit_size(T::Type) = 8 * sizeof(T)
 end
 
-# Why T, whose `bits_kind` is `kind`, can't be a bits type, or `nothing` if it can.
-# See the docstring of `BitsKind` for the requirements. The reason is a tuple of the
+# Why T, whose `codec_scheme` with the byte order `enc` is `kind`, can't be a bits type,
+# or `nothing` if it can. See the docstring of `BitsLoadable` for the requirements. The reason is a tuple of the
 # parts of its message, e.g. strings and types, which `string` joins.
 # The checks of the layout of T only use Base reflection, so they are done when the
-# method is generated. The generated code only calls `bits_kind` of the fields, each with
-# a constant type. So the result is constant-folded if those `bits_kind` methods are
-# foldable, as the docstring of `bits_kind` requires, without assuming it. The message
+# method is generated. The generated code only calls `codec_scheme` of the fields, each
+# with a constant type. So the result is constant-folded if those `codec_scheme` methods
+# are foldable, as the docstring of `codec_scheme` requires, without assuming it. The message
 # is not built here, since that prints types, whose `show` may be overloaded, which
 # would prevent folding.
-@generated function bits_type_error(::Type{T}, kind::BitsKind)::Union{Nothing, Tuple} where {T}
+@generated function bits_type_error(
+        ::Type{T}, kind::BitsScheme, enc::Endianness
+    )::Union{Nothing, Tuple} where {T}
     return Expr(:block, bits_type_error_checks(T)..., :(return nothing))
 end
 
 # The statements of the body of `bits_type_error` for T. The generated code refers to
-# the arguments `T` and `kind`. A check that fails for T regardless of the `bits_kind`
+# the arguments `T`, `kind` and `enc`. A check that fails for T regardless of the scheme
 # of its fields becomes a `return` of the parts of its message, and ends the statements.
 function bits_type_error_checks(T::Type)::Vector{Any}
     if isprimitivetype(T)
@@ -253,10 +152,10 @@ function bits_type_error_checks(T::Type)::Vector{Any}
         return [
             :(
                 return tuple(
-                    "`bits_kind(", T, ")` is `", kind_name(kind), "`, but the bit width ", $n_bits,
+                    "`codec_scheme(", T, ", ", enc, ")` is `", scheme_name(kind), "`, but the bit width ", $n_bits,
                     " of `", T, "` is not a multiple of 8, so `LittleEndian` and `BigEndian` can't ",
-                    "encode it as its bits. To encode it in whole bytes, leave its `bits_kind` as ",
-                    "`Opaque`, and write a codec for each byte order"
+                    "encode it as its bits. To encode it in whole bytes, leave its `codec_scheme` as ",
+                    "`Manual`, and write a codec for each byte order"
                 )
             ),
         ]
@@ -265,7 +164,7 @@ function bits_type_error_checks(T::Type)::Vector{Any}
         return [
             :(
                 return tuple(
-                    "`bits_kind(", T, ")` is `", kind_name(kind), "`, but `", T,
+                    "`codec_scheme(", T, ", ", enc, ")` is `", scheme_name(kind), "`, but `", T,
                     "` is neither a primitive type nor an isbits struct"
                 )
             ),
@@ -275,14 +174,14 @@ function bits_type_error_checks(T::Type)::Vector{Any}
         return [
             :(
                 return tuple(
-                    "`", T, "` has a size of zero bytes, so it can't be `", kind_name(kind),
+                    "`", T, "` has a size of zero bytes, so it can't be `", scheme_name(kind),
                     "`: types of size zero are not supported"
                 )
             ),
         ]
     end
     checks = []
-    # The offset of the next field in the strictest layout, see the docstring of `BitsKind`
+    # The offset of the next field in the strictest layout, see the docstring of `BitsLoadable`
     offset = 0
     for i in 1:fieldcount(T)
         F = fieldtype(T, i)
@@ -290,16 +189,17 @@ function bits_type_error_checks(T::Type)::Vector{Any}
         field_kind = Symbol(:field_kind_, i)
         push!(
             checks, quote
-                $field_kind = bits_kind($F)::BitsKind
-                if $field_kind isa Opaque
+                $field_kind = codec_scheme($F, enc)::CodecScheme
+                if !($field_kind isa BitsScheme)
                     return tuple(
                         "The field `", $name, "` of `", T, "` has the type `", $F,
-                        "`, whose `bits_kind` is `Opaque`"
+                        "`, whose `codec_scheme` with `", enc, "` is `", scheme_name($field_kind),
+                        "`, so it is not encoded as its bits"
                     )
                 elseif kind isa BitsLoadable && !($field_kind isa BitsLoadable)
                     return tuple(
                         "`", T, "` is `BitsLoadable`, but its field `", $name, "` has the type `",
-                        $F, "`, which is `", kind_name($field_kind), "`"
+                        $F, "`, which is `", scheme_name($field_kind), "`"
                     )
                 end
             end
@@ -320,7 +220,7 @@ function bits_type_error_checks(T::Type)::Vector{Any}
         else
             push!(
                 checks, quote
-                    message = bits_type_error($F, $field_kind)
+                    message = bits_type_error($F, $field_kind, enc)
                     message === nothing || return message
                 end
             )
@@ -332,7 +232,7 @@ function bits_type_error_checks(T::Type)::Vector{Any}
                 checks, :(
                     return tuple(
                         "`", T, "` has padding on some or all platforms, so it can't be `",
-                        kind_name(kind), "`: its field `", $name, "` follows ", $offset,
+                        scheme_name(kind), "`: its field `", $name, "` follows ", $offset,
                         " bytes of other fields, which is not a multiple of ", $alignment,
                         ", the size of ", $of_what, $F, "`"
                     )
@@ -346,7 +246,7 @@ function bits_type_error_checks(T::Type)::Vector{Any}
                 checks, :(
                     return tuple(
                         "`", T, "` has padding before its field `", $name, "`, so it can't be `",
-                        kind_name(kind), "`"
+                        scheme_name(kind), "`"
                     )
                 )
             )
@@ -360,7 +260,7 @@ function bits_type_error_checks(T::Type)::Vector{Any}
             checks, :(
                 return tuple(
                     "`", T, "` has padding on some or all platforms, so it can't be `",
-                    kind_name(kind), "`: its fields have ", $offset, " bytes, which is not a ",
+                    scheme_name(kind), "`: its fields have ", $offset, " bytes, which is not a ",
                     "multiple of ", $alignment, ", the size of its largest primitive field"
                 )
             )
@@ -368,7 +268,7 @@ function bits_type_error_checks(T::Type)::Vector{Any}
     elseif offset != sizeof(T)
         push!(
             checks, :(
-                return tuple("`", T, "` has padding at its end, so it can't be `", kind_name(kind), "`")
+                return tuple("`", T, "` has padding at its end, so it can't be `", scheme_name(kind), "`")
             )
         )
     end
@@ -508,22 +408,23 @@ end
     return :(tuple($((:(bytes[$i]) for i in order)...)))
 end
 
-# Whether the bytes of a T in native byte order are valid, for a bits type T.
-@inline function is_valid_value(::Type{T}, bytes::NTuple{N, UInt8}) where {T, N}
-    bits_kind(T) isa BitsStorable || return true
-    isprimitivetype(T) || fields_valid(T, bytes) || return false
+# Whether the bytes of a T in native byte order are valid, for a bits type T with the
+# byte order `e`.
+@inline function is_valid_value(::Type{T}, bytes::NTuple{N, UInt8}, e::Endianness) where {T, N}
+    codec_scheme(T, e) isa BitsStorable || return true
+    isprimitivetype(T) || fields_valid(T, bytes, e) || return false
     return is_valid_bits(T, bytes)::Bool
 end
 
 # Whether the bytes of each field of the struct T, in native byte order, are valid.
 # The generator only uses the layout of T. `is_valid_value` is called in the generated
 # code, since it calls methods that may be added later.
-@generated function fields_valid(::Type{T}, bytes::NTuple{N, UInt8}) where {T, N}
+@generated function fields_valid(::Type{T}, bytes::NTuple{N, UInt8}, e::Endianness) where {T, N}
     checks = map(1:fieldcount(T)) do i
         F = fieldtype(T, i)
         offset = Int(fieldoffset(T, i))
         field_bytes = :(tuple($((:(bytes[$(offset + j)]) for j in 1:sizeof(F))...)))
-        :(is_valid_value($F, $field_bytes))
+        :(is_valid_value($F, $field_bytes, e))
     end
     return foldr((a, b) -> :($a && $b), checks; init = true)
 end
@@ -531,7 +432,7 @@ end
 # Decode a T of kind `kind` at `offset` in `mem`. The caller must ensure that the
 # `bits_encoded_size(T)` bytes are within `mem`.
 @inline function unsafe_decode_bits(
-        kind::Union{BitsLoadable, BitsStorable}, mem::MemoryView, offset::Int, ::Type{T}, e::Endianness
+        kind::BitsScheme, mem::MemoryView, offset::Int, ::Type{T}, e::Endianness
     )::Union{T, DecodeError} where {T}
     return if isprimitivetype(T)
         unsafe_decode_primitive(kind, mem, offset, T, e)
@@ -541,7 +442,7 @@ end
 end
 
 @inline function unsafe_decode_primitive(
-        kind::Union{BitsLoadable, BitsStorable}, mem::MemoryView, offset::Int, ::Type{T}, e::Endianness
+        kind::BitsScheme, mem::MemoryView, offset::Int, ::Type{T}, e::Endianness
     )::Union{T, DecodeError} where {T}
     kind isa BitsLoadable && fills_bytes(T) && return unsafe_load_bits(mem, offset, T, e)
     N = bits_encoded_size(T)
@@ -563,7 +464,7 @@ end
 end
 
 @inline function unsafe_decode_struct(
-        kind::Union{BitsLoadable, BitsStorable}, mem::MemoryView, offset::Int, ::Type{T}, e::Endianness
+        kind::BitsScheme, mem::MemoryView, offset::Int, ::Type{T}, e::Endianness
     )::Union{T, DecodeError} where {T}
     kind isa BitsLoadable && e === NATIVE_ENDIAN && return unsafe_load_at(mem, T, offset)
     bytes = unsafe_load_at(mem, NTuple{sizeof(T), UInt8}, offset)
@@ -571,7 +472,7 @@ end
         bytes = swap_fields(T, bytes)
     end
     if kind isa BitsStorable
-        is_valid_value(T, bytes) || return DecodeError(InvalidData)
+        is_valid_value(T, bytes, e) || return DecodeError(InvalidData)
     end
     return reinterpret(T, bytes)
 end

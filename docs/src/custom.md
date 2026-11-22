@@ -23,28 +23,57 @@ See their docstrings for details (click them to go to their docstring in this do
 `codec_try_decode` reads its input through [`BitScribbling.require_bytes`](@ref), [`BitScribbling.peek_byte`](@ref) and [`BitScribbling.decode_field`](@ref), and `codec_try_encode!` writes its output through [`BitScribbling.reserve_bytes`](@ref) and [`BitScribbling.encode_field`](@ref). When loading from an `AbstractBufReader`, these make the reader wait for exactly the bytes the codec reads, so a codec for a variable-length encoding, like `Char`'s `UTF8` encoding, doesn't make loading wait for the maximal number of bytes of any instance of `T`. A codec is compiled twice: for inputs and outputs known to hold the maximal number of bytes, where the checks of these functions are removed, and for shorter ones, near the end of the data.
 
 ## Deriving codecs automatically
-Two codecs are special: `LittleEndian` and `BigEndian` (together: [`Endianness`](@ref)) represent the "native" binary representation of an object.
+Instead of implementing a codec, a type can get one from its [`CodecScheme`](@ref BitScribbling.CodecScheme), by adding a method to
+[`BitScribbling.codec_scheme`](@ref BitScribbling.codec_scheme). It defaults to `Manual()`, which means the codec must be
+implemented manually, as described above.
+
+### Bits types
+Two encodings are special: `LittleEndian` and `BigEndian` (together: [`Endianness`](@ref)) represent the "native" binary representation of an object.
 
 Not all objects must have [`Endianness`](@ref) encodings. For example, the `BigEndian` encoding of the Julia `Char` `'Ø'`
 would be `c3 98 00 00` (same as `reinterpret(UInt32, 'Ø')` in big endian), but it may not be prudent to expose the internal binary representation of Julia objects.
 Instead, BitScribbling.jl defines a `struct UTF8 <: Encoding end`, and defines the encoding of `'Ø'`
 under `UTF8` as `c3 98` (which is its representation in e.g. a Julia `String`).
 
-The endianness encodings are special because they may be automatically derived by implementing the trait
-`BitScribbling.bits_kind(::Type{T})`:
+For the endianness encodings, the codec may be derived from the bits of the type in memory:
 
-* If `bits_kind(T)` returns `BitsLoadable()`, the type may be loaded and stored via pointer loads or stores, or memcpy.
-* Else, if `bits_kind(T)` returns `BitsStorable()`, it may be stored via pointer stores, but needs validation on loading, as not all bit patterns are valid.
-* Else, the default is `Opaque()`, which means the encoding cannot be derived and must be manually implemented.
+* If `codec_scheme(T, e)` returns `BitsLoadable()`, the type may be loaded and stored via pointer loads or stores, or memcpy.
+* Else, if it returns `BitsStorable()`, it may be stored via pointer stores, but needs validation on loading, as not all bit patterns are valid.
 
-See more [details about the bits kinds on the Concepts page](@ref bitskinds).
+See more [details about the codec schemes on the Concepts page](@ref bitskinds).
 
 This simplifies the common case for e.g. `UInt32` where the endianness encoding is simply writing its bits directly to memory (possibly byte-swapping, depending on the host CPU endianness).
 
-Most types can probably derive the codec this way. See the diagram below for an overview,
-and the sections below for more details.
+### Proxies
+A type that can be converted to and from another type `P` with a codec can be encoded exactly as `P` is,
+with any encoding that `P` has a codec for, by declaring `codec_scheme` to be `Proxy{P}()`.
+Then, implement [`BitScribbling.to_proxy`](@ref BitScribbling.to_proxy) and [`BitScribbling.try_from_proxy`](@ref BitScribbling.try_from_proxy).
+The latter returns `nothing` if the proxy is not a valid value, which makes decoding fail with `InvalidData`.
 
-If the bits kind is `Opaque()`, this means the codec has to be manually implemented,
+For example, this struct has padding in memory, so it can't be `BitsLoadable`, but it can be encoded
+as a tuple, which has no padding in its encoding:
+
+```julia
+using BitScribbling: BitScribbling, Proxy, Endianness
+
+struct Record
+    kind::UInt8
+    id::UInt32
+end
+
+BitScribbling.codec_scheme(::Type{Record}, ::Endianness) = Proxy{Tuple{UInt8, UInt32}}()
+BitScribbling.to_proxy(x::Record, ::Endianness) = (x.kind, x.id)
+function BitScribbling.try_from_proxy(::Type{Record}, (kind, id)::Tuple{UInt8, UInt32}, ::Endianness)
+    return Record(kind, id)
+end
+```
+
+The encoding of a `Record` is then 5 bytes: the `kind`, followed by the `id`.
+A proxy compiles to the same code as its proxy type does, except that the bulk functions,
+such as [`decode_all!`](@ref), can't copy the memory of many values at once, as they can
+for `BitsLoadable` types.
+
+If no other way applies, the codec has to be manually implemented,
 as described above. That is always a valid option for any type whose encodings have a
 bounded size, also for types that are not bitstypes.
 

@@ -56,11 +56,14 @@ export Encoding,
 
 public Little,
     Big,
-    BitsKind,
+    CodecScheme,
     BitsLoadable,
     BitsStorable,
-    Opaque,
-    bits_kind,
+    Manual,
+    Proxy,
+    codec_scheme,
+    to_proxy,
+    try_from_proxy,
     is_valid_bits,
     as_unsigned,
     codec_max_encoded_size,
@@ -78,6 +81,7 @@ public Little,
 
 include("encodings.jl")
 include("errors.jl")
+include("schemes.jl")
 include("interface.jl")
 include("bits.jl")
 include("utf8.jl")

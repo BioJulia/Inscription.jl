@@ -30,29 +30,29 @@ end
 # Primitive types of odd sizes. Since Julia 1.14, their size in memory is rounded up to a
 # power of two bytes, but they are encoded in the bytes their bits need.
 primitive type U24 24 end
-BitScribbling.bits_kind(::Type{U24}) = BitsLoadable()
+BitScribbling.codec_scheme(::Type{U24}, ::Endianness) = BitsLoadable()
 primitive type U144 144 end
-BitScribbling.bits_kind(::Type{U144}) = BitsLoadable()
+BitScribbling.codec_scheme(::Type{U144}, ::Endianness) = BitsLoadable()
 # The top bit must be zero
 primitive type S24 24 end
-BitScribbling.bits_kind(::Type{S24}) = BitsStorable()
+BitScribbling.codec_scheme(::Type{S24}, ::Endianness) = BitsStorable()
 BitScribbling.is_valid_bits(::Type{S24}, bytes::NTuple{3, UInt8}) = as_unsigned(bytes) < 0x00800000
 # Wider than the largest unsigned integer. The top bit must be zero.
 primitive type S144 144 end
-BitScribbling.bits_kind(::Type{S144}) = BitsStorable()
+BitScribbling.codec_scheme(::Type{S144}, ::Endianness) = BitsStorable()
 function BitScribbling.is_valid_bits(::Type{S144}, bytes::NTuple{18, UInt8})
     top = NATIVE_ENDIAN === LittleEndian() ? bytes[18] : bytes[1]
     return top < 0x80
 end
 # BitsStorable, but doesn't implement `is_valid_bits`
 primitive type NoCheck16 16 end
-BitScribbling.bits_kind(::Type{NoCheck16}) = BitsStorable()
+BitScribbling.codec_scheme(::Type{NoCheck16}, ::Endianness) = BitsStorable()
 
 # The trait can't be declared for types that are neither primitive types nor isbits structs
 struct Boxed
     x::Vector{UInt8}
 end
-BitScribbling.bits_kind(::Type{Boxed}) = BitsLoadable()
+BitScribbling.codec_scheme(::Type{Boxed}, ::Endianness) = BitsLoadable()
 
 # The low 128 bits of a primitive value, as an integer
 function low_bits(x::T) where {T}
@@ -74,13 +74,13 @@ if HAS_NARROW
         # Bit widths that are not a multiple of 8 can't be encoded as their bits with a
         # byte order, since that would need padding bits
         primitive type U22 22 end
-        BitScribbling.bits_kind(::Type{U22}) = BitsLoadable()
+        BitScribbling.codec_scheme(::Type{U22}, ::Endianness) = BitsLoadable()
         primitive type U5 5 end
-        BitScribbling.bits_kind(::Type{U5}) = BitsLoadable()
+        BitScribbling.codec_scheme(::Type{U5}, ::Endianness) = BitsLoadable()
         primitive type U30 30 end
-        BitScribbling.bits_kind(::Type{U30}) = BitsLoadable()
+        BitScribbling.codec_scheme(::Type{U30}, ::Endianness) = BitsLoadable()
         primitive type S12 12 end
-        BitScribbling.bits_kind(::Type{S12}) = BitsStorable()
+        BitScribbling.codec_scheme(::Type{S12}, ::Endianness) = BitsStorable()
         BitScribbling.is_valid_bits(::Type{S12}, bytes::NTuple{2, UInt8}) = true
 
         # The design's example of a hand-written codec for a narrow type
@@ -264,21 +264,21 @@ struct Header
     flags::UInt8
     kind::UInt8
 end
-BitScribbling.bits_kind(::Type{Header}) = BitsLoadable()
+BitScribbling.codec_scheme(::Type{Header}, ::Endianness) = BitsLoadable()
 struct Nested
     header::Header
     x::Float32
     y::Int16
     z::Int16
 end
-BitScribbling.bits_kind(::Type{Nested}) = BitsLoadable()
+BitScribbling.codec_scheme(::Type{Nested}, ::Endianness) = BitsLoadable()
 # The fields are checked, and then that the fruit is `apple` unless `on`
 struct Flagged
     on::Bool
     other::UInt8
     fruit::Fruit
 end
-BitScribbling.bits_kind(::Type{Flagged}) = BitsStorable()
+BitScribbling.codec_scheme(::Type{Flagged}, ::Endianness) = BitsStorable()
 function BitScribbling.is_valid_bits(::Type{Flagged}, bytes::NTuple{4, UInt8})
     x = reinterpret(Flagged, bytes)
     return x.on || x.fruit === apple
@@ -287,31 +287,31 @@ struct Outer
     a::Flagged
     b::Flagged
 end
-BitScribbling.bits_kind(::Type{Outer}) = BitsStorable()
+BitScribbling.codec_scheme(::Type{Outer}, ::Endianness) = BitsStorable()
 BitScribbling.is_valid_bits(::Type{Outer}, ::NTuple{8, UInt8}) = true
 # Types of size zero are rejected, also as fields
 struct Empty end
-BitScribbling.bits_kind(::Type{Empty}) = BitsLoadable()
+BitScribbling.codec_scheme(::Type{Empty}, ::Endianness) = BitsLoadable()
 struct WithEmpty
     a::UInt32
     e::Empty
 end
-BitScribbling.bits_kind(::Type{WithEmpty}) = BitsLoadable()
+BitScribbling.codec_scheme(::Type{WithEmpty}, ::Endianness) = BitsLoadable()
 
 # Structs that can't be bits types
 struct Padded
     a::UInt8
     b::UInt32
 end
-BitScribbling.bits_kind(::Type{Padded}) = BitsLoadable()
+BitScribbling.codec_scheme(::Type{Padded}, ::Endianness) = BitsLoadable()
 struct LoadableWithBool
     a::Bool
 end
-BitScribbling.bits_kind(::Type{LoadableWithBool}) = BitsLoadable()
+BitScribbling.codec_scheme(::Type{LoadableWithBool}, ::Endianness) = BitsLoadable()
 struct WithChar
     c::Char
 end
-BitScribbling.bits_kind(::Type{WithChar}) = BitsLoadable()
+BitScribbling.codec_scheme(::Type{WithChar}, ::Endianness) = BitsLoadable()
 # Doesn't opt in
 struct Plain
     x::UInt32
@@ -319,44 +319,44 @@ end
 struct WithPlain
     p::Plain
 end
-BitScribbling.bits_kind(::Type{WithPlain}) = BitsLoadable()
+BitScribbling.codec_scheme(::Type{WithPlain}, ::Endianness) = BitsLoadable()
 struct WithPadded
     p::Padded
 end
-BitScribbling.bits_kind(::Type{WithPadded}) = BitsLoadable()
+BitScribbling.codec_scheme(::Type{WithPadded}, ::Endianness) = BitsLoadable()
 # Has padding on some platforms only: `b` follows 4 bytes, and is aligned to 8 on x86-64
 struct Misaligned
     a::UInt32
     b::UInt64
 end
-BitScribbling.bits_kind(::Type{Misaligned}) = BitsLoadable()
+BitScribbling.codec_scheme(::Type{Misaligned}, ::Endianness) = BitsLoadable()
 # Its size, 12, is not a multiple of 8
 struct TrailingPadding
     a::UInt64
     b::UInt32
 end
-BitScribbling.bits_kind(::Type{TrailingPadding}) = BitsLoadable()
+BitScribbling.codec_scheme(::Type{TrailingPadding}, ::Endianness) = BitsLoadable()
 # `h` follows 2 bytes, but contains a `UInt32`
 struct MisalignedNested
     a::UInt16
     h::Header
 end
-BitScribbling.bits_kind(::Type{MisalignedNested}) = BitsLoadable()
+BitScribbling.codec_scheme(::Type{MisalignedNested}, ::Endianness) = BitsLoadable()
 # No padding on x86-64, where `U256` is aligned to 16 bytes, but a platform could align it
 # to 32 bytes, its size
 primitive type U256 256 end
-BitScribbling.bits_kind(::Type{U256}) = BitsLoadable()
+BitScribbling.codec_scheme(::Type{U256}, ::Endianness) = BitsLoadable()
 struct WithU256
     a::UInt128
     b::U256
 end
-BitScribbling.bits_kind(::Type{WithU256}) = BitsLoadable()
+BitScribbling.codec_scheme(::Type{WithU256}, ::Endianness) = BitsLoadable()
 # Widths that are not powers of two are rejected on every Julia version, also where the
 # bits of a `U24` fill its 3 bytes
 struct WithU24
     x::U24
 end
-BitScribbling.bits_kind(::Type{WithU24}) = BitsLoadable()
+BitScribbling.codec_scheme(::Type{WithU24}, ::Endianness) = BitsLoadable()
 # Accepted: ordered from largest to smallest, or with a field for the padding
 struct Ordered
     b::UInt64
@@ -365,19 +365,19 @@ struct Ordered
     d::UInt8
     e::UInt8
 end
-BitScribbling.bits_kind(::Type{Ordered}) = BitsLoadable()
+BitScribbling.codec_scheme(::Type{Ordered}, ::Endianness) = BitsLoadable()
 struct ExplicitPadding
     a::UInt32
     pad::UInt32
     b::UInt64
 end
-BitScribbling.bits_kind(::Type{ExplicitPadding}) = BitsLoadable()
+BitScribbling.codec_scheme(::Type{ExplicitPadding}, ::Endianness) = BitsLoadable()
 struct WithU256Aligned
     b::U256
     a::UInt128
     c::UInt128
 end
-BitScribbling.bits_kind(::Type{WithU256Aligned}) = BitsLoadable()
+BitScribbling.codec_scheme(::Type{WithU256Aligned}, ::Endianness) = BitsLoadable()
 
 # An even byte, with a hand-written codec for the byte orders, which rejects odd bytes
 # both ways
@@ -405,7 +405,75 @@ struct WithTuple
     t::NTuple{2, UInt16}
     x::UInt32
 end
-BitScribbling.bits_kind(::Type{WithTuple}) = BitsLoadable()
+BitScribbling.codec_scheme(::Type{WithTuple}, ::Endianness) = BitsLoadable()
+
+# Proxied types
+# Valid only if `lo ≤ hi`, encoded as a tuple
+struct Span
+    lo::UInt16
+    hi::UInt16
+end
+BitScribbling.codec_scheme(::Type{Span}, ::Endianness) = Proxy{NTuple{2, UInt16}}()
+BitScribbling.to_proxy(x::Span, ::Endianness) = (x.lo, x.hi)
+function BitScribbling.try_from_proxy(::Type{Span}, (lo, hi)::NTuple{2, UInt16}, ::Endianness)
+    return lo ≤ hi ? Span(lo, hi) : nothing
+end
+# Has padding in memory, but not in its encoding
+struct Sparse
+    a::UInt8
+    b::UInt32
+end
+BitScribbling.codec_scheme(::Type{Sparse}, ::Endianness) = Proxy{Tuple{UInt8, UInt32}}()
+BitScribbling.to_proxy(x::Sparse, ::Endianness) = (x.a, x.b)
+BitScribbling.try_from_proxy(::Type{Sparse}, (a, b)::Tuple{UInt8, UInt32}, ::Endianness) = Sparse(a, b)
+# Encodings of varying size, with an encoding other than the byte orders
+struct Glyph
+    c::Char
+end
+BitScribbling.codec_scheme(::Type{Glyph}, ::UTF8) = Proxy{Char}()
+BitScribbling.to_proxy(x::Glyph, ::UTF8) = x.c
+BitScribbling.try_from_proxy(::Type{Glyph}, c::Char, ::UTF8) = Glyph(c)
+# A proxy of a proxied type
+struct Nest
+    s::Span
+end
+BitScribbling.codec_scheme(::Type{Nest}, ::Endianness) = Proxy{Span}()
+BitScribbling.to_proxy(x::Nest, ::Endianness) = x.s
+BitScribbling.try_from_proxy(::Type{Nest}, s::Span, ::Endianness) = Nest(s)
+# A proxy for every encoding, which works for the encodings of the proxy
+struct Wrapped
+    c::Char
+end
+BitScribbling.codec_scheme(::Type{Wrapped}, ::Encoding) = Proxy{Char}()
+BitScribbling.to_proxy(x::Wrapped, ::Encoding) = x.c
+BitScribbling.try_from_proxy(::Type{Wrapped}, c::Char, ::Encoding) = Wrapped(c)
+
+# Proxies that can't be used
+struct AbstractProxied end
+BitScribbling.codec_scheme(::Type{AbstractProxied}, ::Endianness) = Proxy{Integer}()
+struct SelfProxied
+    x::UInt8
+end
+BitScribbling.codec_scheme(::Type{SelfProxied}, ::Endianness) = Proxy{SelfProxied}()
+struct NotTypeProxied end
+BitScribbling.codec_scheme(::Type{NotTypeProxied}, ::Endianness) = Proxy{1}()
+# `to_proxy` returns a `UInt8`, not the proxy type
+struct WrongProxy
+    x::UInt8
+end
+BitScribbling.codec_scheme(::Type{WrongProxy}, ::Endianness) = Proxy{UInt16}()
+BitScribbling.to_proxy(x::WrongProxy, ::Endianness) = x.x
+BitScribbling.try_from_proxy(::Type{WrongProxy}, x::UInt16, ::Endianness) = WrongProxy(x % UInt8)
+# A field with a proxy is not encoded as its bits
+struct WithProxied
+    s::Span
+end
+BitScribbling.codec_scheme(::Type{WithProxied}, ::Endianness) = BitsLoadable()
+# Bits schemes are only for the byte orders
+struct BitsEverywhere
+    x::UInt8
+end
+BitScribbling.codec_scheme(::Type{BitsEverywhere}, ::Encoding) = BitsLoadable()
 
 # Tuples of each kind: bits types, and tuples encoded element by element, because they
 # have padding, an element type has a hand-written codec, or is a bits type that can't be
@@ -423,7 +491,7 @@ if HAS_NARROW
         struct WithNarrow
             x::U30
         end
-        BitScribbling.bits_kind(::Type{WithNarrow}) = BitsLoadable()
+        BitScribbling.codec_scheme(::Type{WithNarrow}, ::Endianness) = BitsLoadable()
     end
 end
 
@@ -484,6 +552,13 @@ const CODEC_CASES = let
         (Tuple{Bool, UInt32, S24}, BigEndian(), (true, 0x01020304, s24)),
         (Tuple{U144, Flagged}, LittleEndian(), (u144, Flagged(false, 0x07, apple))),
         (Tuple{Even, UInt16}, BigEndian(), (Even(0x04), 0x0102)),
+        # Proxies
+        (Span, LittleEndian(), Span(0x0102, 0x0304)),
+        (Sparse, BigEndian(), Sparse(0x01, 0x02030405)),
+        (Glyph, UTF8(), Glyph('€')),
+        (Nest, BigEndian(), Nest(Span(0x0102, 0x0304))),
+        (Wrapped, Latin1(), Wrapped('é')),
+        (Tuple{Span, UInt8}, LittleEndian(), (Span(0x0001, 0x0002), 0x03)),
     ]
     HAS_NARROW && push!(cases, (U29, LittleEndian(), U29(0x01234567)))
     cases

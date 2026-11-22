@@ -12,7 +12,7 @@ Y --> |Yes| Z[Bitstype?]
 Z --> |No| C
 Z --> |Yes| A
 A[Struct or primitive type?] --> |Struct| B[Contains padding on any platform? see Structs]
-B --> |Yes| C[Implement Opaque]
+B --> |Yes| C[Can it be converted to and from another type, e.g. a tuple?]
 B --> |No| D[All fields recursively BitsLoadable?]
 D --> |Yes| E[Implement BitsLoadable]
 D --> |No| F[All fields recursively BitsStorable?]
@@ -20,9 +20,12 @@ F --> |Yes| G[Implement BitsStorable]
 F --> |No| C
 
 A --> |Primitive| H[Bit size multiple of 8?]
-H --> |No| I[Implement Opaque, see Odd Sized Primitives]
+H --> |No| I[Implement Manual, see Odd Sized Primitives]
 H --> |Yes| J[Storage same bits as in-memory representation?]
 J --> |No| C
 J --> |Yes| K[All bitpatterns valid?]
 K --> |Yes| E
 K --> |No| G
+
+C --> |Yes| P[Declare Proxy]
+C --> |No| M[Implement Manual]

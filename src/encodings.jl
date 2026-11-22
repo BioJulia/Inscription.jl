@@ -19,14 +19,16 @@ Conceptually, these signal loading and storing the raw bits of the value of `T`.
 For example, encoding the `UInt32` `0x01020304` in `LittleEndian` encodes it
 to the following bytes `[0x04, 0x03, 0x02, 0x01]`.
 
-Codecs for Endian `Encoding`s can be automatically implemented via the [`BitsKind`](@ref)
-trait, see the `BitsKind` docstring for details how.
+Codecs for Endian `Encoding`s can be automatically implemented by declaring the type
+[`BitsLoadable`](@ref) or [`BitsStorable`](@ref), and a type can be encoded as another
+type with any encoding by declaring a [`Proxy`](@ref). See [`CodecScheme`](@ref).
 
 See also: [`Endianness`](@ref)
 
 # Extended help
 ## Manually implementing a codec
-Before doing so, check if you can opt into already-generated codecs via [`BitsKind`](@ref).
+Before doing so, check if you can opt into already-generated codecs via
+[`CodecScheme`](@ref).
 
 A hand-written codec for `T` and an encoding type `E` consists of three methods:
 * [`codec_max_encoded_size(::Type{T}, ::E)`](@ref codec_max_encoded_size)

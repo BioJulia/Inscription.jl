@@ -12,14 +12,14 @@
     @test_throws MethodError store(VecWriter(), ('a', 'b'), LittleEndian())
 end
 
-@testset "Bits kinds" begin
+@testset "Codec schemes" begin
     for T in BITS_TYPES
-        @test bits_kind(T) === BitsLoadable()
+        @test codec_scheme(T, LittleEndian()) === BitsLoadable()
     end
-    @test bits_kind(Bool) === BitsStorable()
-    @test bits_kind(Fruit) === BitsStorable()
+    @test codec_scheme(Bool, LittleEndian()) === BitsStorable()
+    @test codec_scheme(Fruit, LittleEndian()) === BitsStorable()
     for T in (Char, Ptr{UInt8}, String, Tuple{Char, Char})
-        @test bits_kind(T) === Opaque()
+        @test codec_scheme(T, LittleEndian()) === Manual()
     end
     native(x) = reinterpret(NTuple{sizeof(x), UInt8}, x)
     @test is_valid_bits(Bool, (0x00,)) && is_valid_bits(Bool, (0x01,))
@@ -233,8 +233,8 @@ HAS_NARROW && @testset "Primitive types narrower than whole bytes" begin
     catch e
         sprint(showerror, e)
     end
-    @test occursin("`bits_kind(U22)` is `BitsLoadable`, but the bit width 22 of `U22` is not a multiple of 8", message(U22))
-    @test occursin("`bits_kind(S12)` is `BitsStorable`", message(S12))
+    @test occursin("`codec_scheme(U22, LittleEndian())` is `BitsLoadable`, but the bit width 22 of `U22` is not a multiple of 8", message(U22))
+    @test occursin("`codec_scheme(S12, LittleEndian())` is `BitsStorable`", message(S12))
 
     # The design's example of a hand-written codec
     io = CursorReader([0x01, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff])

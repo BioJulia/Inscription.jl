@@ -112,7 +112,7 @@ end
         complete::Bool,
     )::Tuple{Int, Int} where {T}
     kind = codec_kind(T, enc)
-    if !(kind isa Opaque)
+    if kind isa BitsScheme
         # Fixed size: each whole element in src is decided
         element_size = bits_encoded_size(T)
         n_max = min(length(dst), div(length(src), element_size))
@@ -198,7 +198,7 @@ julia> dst
 function encode_all!(
         dst::MutableMemoryView{UInt8}, src::MemoryView{T}, enc::Encoding
     )::Tuple{Int, Int} where {T}
-    if !(codec_kind(T, enc) isa Opaque)
+    if codec_kind(T, enc) isa BitsScheme
         element_size = bits_encoded_size(T)
         n_elements = min(length(src), div(length(dst), element_size))
         if is_dense_bits(T)

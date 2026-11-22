@@ -178,7 +178,7 @@ end
     end
     @test occursin("`Padded` has padding on some or all platforms, so it can't be `BitsLoadable`: its field `b` follows 1 bytes of other fields, which is not a multiple of 4, the size of its type `UInt32`", message(Padded))
     @test occursin("`LoadableWithBool` is `BitsLoadable`, but its field `a` has the type `Bool`, which is `BitsStorable`", message(LoadableWithBool))
-    @test occursin("field `c` of `WithChar` has the type `Char`, whose `bits_kind` is `Opaque`", message(WithChar))
+    @test occursin("field `c` of `WithChar` has the type `Char`, whose `codec_scheme` with `LittleEndian()` is `Manual`", message(WithChar))
     @test occursin("field `p` of `WithPlain` has the type `Plain`", message(WithPlain))
     @test occursin("`Padded` has padding", message(WithPadded))
     HAS_NARROW && @test occursin("whose bit width 30 is not a power of two of at least 8", message(WithNarrow))
@@ -223,15 +223,15 @@ end
     @test Set(map(typeof, values)) == Set((BITS_TUPLES..., ELEMENTWISE_TUPLES...))
 
     # Bits types if the requirements of bits structs hold, else encoded element by element
-    @test all(T -> !(bits_kind(T) isa Opaque), BITS_TUPLES)
-    @test all(T -> bits_kind(T) isa Opaque, ELEMENTWISE_TUPLES)
-    @test bits_kind(NTuple{2, UInt16}) === BitsLoadable()
-    @test bits_kind(Tuple{Fruit, Bool, Small}) === BitsStorable()
-    @test bits_kind(Tuple{Tuple{Small, Small}, Fruit}) === BitsStorable()
+    @test all(T -> !(codec_scheme(T, LittleEndian()) isa Manual), BITS_TUPLES)
+    @test all(T -> codec_scheme(T, LittleEndian()) isa Manual, ELEMENTWISE_TUPLES)
+    @test codec_scheme(NTuple{2, UInt16}, LittleEndian()) === BitsLoadable()
+    @test codec_scheme(Tuple{Fruit, Bool, Small}, LittleEndian()) === BitsStorable()
+    @test codec_scheme(Tuple{Tuple{Small, Small}, Fruit}, LittleEndian()) === BitsStorable()
     # `Tuple{Fruit, Bool}` has padding at its end, so a tuple containing it can't be a bits type
-    @test bits_kind(Tuple{Tuple{Fruit, Bool}, Small, Small}) === Opaque()
-    @test bits_kind(Tuple{Char, Char}) === Opaque()
-    @test bits_kind(Tuple{Integer}) === Opaque()
+    @test codec_scheme(Tuple{Tuple{Fruit, Bool}, Small, Small}, LittleEndian()) === Manual()
+    @test codec_scheme(Tuple{Char, Char}, LittleEndian()) === Manual()
+    @test codec_scheme(Tuple{Integer}, LittleEndian()) === Manual()
     # Structs may have tuple fields
     w = WithTuple((0x0102, 0x0304), 0x05060708)
     bytes = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]

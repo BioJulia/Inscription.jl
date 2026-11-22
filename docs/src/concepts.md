@@ -33,12 +33,15 @@ baked into the CPU. Practically all platforms are little-endian natively, but so
 are big-endian. BitScribbling.jl represents the two byte orders as the [`LittleEndian`](@ref) and [`BigEndian`](@ref)
 encodings, which together make up [`Endianness`](@ref).
 
-#### [`BitsStorable`, `BitsLoadable` and `Opaque`](@id bitskinds)
+#### [Codec schemes: `BitsLoadable`, `BitsStorable`, `Proxy` and `Manual`](@id bitskinds)
+Every pair of a type and an encoding has a [`CodecScheme`](@ref BitScribbling.CodecScheme), which says where its codec comes from.
+It is set by adding a method to [`BitScribbling.codec_scheme`](@ref BitScribbling.codec_scheme).
+
 Some types like `UInt32` have a simple encoding: copy the data directly to and from memory, possibly
 byte-swapping first to account for endianness.
 
 Instead of needing users to implement a codec for such types, users may declare a type `MyType`
-as being `BitsLoadable` via `BitScribbling.bits_kind(::Type{MyType}) = BitScribbling.BitsLoadable()`,
+as being `BitsLoadable` via `BitScribbling.codec_scheme(::Type{MyType}, ::Endianness) = BitScribbling.BitsLoadable()`,
 and then BitScribbling's functions automatically work for instances of `MyType` with the encodings
 `LittleEndian` and `BigEndian`, by copying to and from memory directly.
 
@@ -47,10 +50,18 @@ as some bit patterns are invalid. Users can define such a type as `BitsStorable(
 only need to add a method to `BitScribbling.is_valid_bits` to validate a given bit pattern for their type.
 Then, all the functions in BitScribbling.jl will work for such types for encodings `LittleEndian` and `BigEndian`.
 
+Many types can be converted to and from another type that already has a codec, often a tuple.
+For example, a struct with padding can't be `BitsLoadable`, but it can be converted to a tuple of its parts,
+whose elements are encoded one after another without padding.
+Such a type can be declared a [`Proxy`](@ref BitScribbling.Proxy) of the other type, with `Proxy{P}()`, and implement
+[`BitScribbling.to_proxy`](@ref BitScribbling.to_proxy) and [`BitScribbling.try_from_proxy`](@ref BitScribbling.try_from_proxy).
+Then it is encoded exactly as the proxy is. This works with any encoding, and it doesn't make the fields
+of a struct part of its encoding, so they can change without changing the encoding.
+
 Finally, some types can't be read or written directly. For example, it makes little sense to store `Char`
 as `LittleEndian` or `BigEndian` - this should probably be encoded via an encoding like [`UTF8`](@ref) or `UTF32`.
-Other types may have custom, arbitrary serialization rules. For such types, the `bits_kind` must stay
-the default value of `Opaque()`, and users must implement a codec.
+Other types may have custom, arbitrary serialization rules. For such types, the `codec_scheme` must stay
+the default value of `Manual()`, and users must implement a codec.
 
 #### Encode, decode, load, store
 BitScribbling.jl uses [`encode!`](@ref) to store a value into a byte array, and [`decode`](@ref) to load it from a byte array.

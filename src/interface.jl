@@ -15,12 +15,17 @@ julia> max_encoded_size(Char, UTF8())
 ```
 """
 @inline function max_encoded_size(::Type{T}, enc::Encoding)::Int where {T}
-    return if codec_kind(T, enc) isa Opaque
-        val_size(codec_max_encoded_size(T, enc), T, enc)
-    else
+    scheme = codec_kind(T, enc)
+    return if scheme isa BitsScheme
         bits_encoded_size(T)
+    elseif scheme isa Proxy
+        proxy_max_encoded_size(scheme, enc)
+    else
+        val_size(codec_max_encoded_size(T, enc), T, enc)
     end
 end
+
+@inline proxy_max_encoded_size(::Proxy{P}, enc::Encoding) where {P} = max_encoded_size(P, enc)
 
 # The size in the `Val` returned by `codec_max_encoded_size`. It is checked here, and the
 # check is constant-folded.
@@ -279,7 +284,7 @@ end
         mem::MemoryView{UInt8}, i::Int, ::Type{T}, enc::Encoding
     )::Union{Tuple{T, Int}, DecodeError} where {T}
     kind = codec_kind(T, enc)
-    if kind isa Opaque
+    if !(kind isa BitsScheme)
         @boundscheck check_start_index(mem, i)
         rest = unsafe_suffix(ImmutableMemoryView(mem), i)
         length(rest) ≥ max_encoded_size(T, enc) || return decode_memory_short(rest, T, enc)
@@ -315,7 +320,7 @@ end
         mem::ImmutableMemoryView{UInt8}, ::Type{T}, enc::Encoding, ends::Bool
     )::Union{Tuple{T, Int}, TooShort, Invalid} where {T}
     kind = codec_kind(T, enc)
-    if kind isa Opaque
+    if !(kind isa BitsScheme)
         length(mem) ≥ max_encoded_size(T, enc) && return decode_full(mem, T, enc)
         return decode_short(mem, T, enc, ends)
     end
@@ -410,7 +415,7 @@ end
 @inline function _try_encode!(
         mem::MutableMemoryView{UInt8}, i::Int, x::T, enc::Encoding
     )::Union{Int, EncodeError} where {T}
-    if codec_kind(T, enc) isa Opaque
+    if !(codec_kind(T, enc) isa BitsScheme)
         @boundscheck check_start_index(mem, i)
         rest = unsafe_suffix(mem, i)
         length(rest) ≥ max_encoded_size(T, enc) || return encode_memory_short(rest, x, enc)
@@ -438,7 +443,7 @@ end
 
 # Encode `x` at the start of `mem`, the counterpart of `decode_start`
 @inline function encode_start(mem::MutableMemoryView{UInt8}, x::T, enc::Encoding)::Union{Int, TooShort, Invalid} where {T}
-    if codec_kind(T, enc) isa Opaque
+    if !(codec_kind(T, enc) isa BitsScheme)
         length(mem) ≥ max_encoded_size(T, enc) && return encode_full(mem, x, enc)
         return encode_short(mem, x, enc)
     end
@@ -508,10 +513,10 @@ end
         mem::MemoryView, i::Int, ::Type{T}, enc::Encoding, err::EncodeError
     ) where {T}
     err.kind === InsufficientSpace || throw_encode_error(err)
-    stop = if codec_kind(T, enc) isa Opaque
-        length(mem) + 1
-    else
+    stop = if codec_kind(T, enc) isa BitsScheme
         i + bits_encoded_size(T) - 1
+    else
+        length(mem) + 1
     end
     return @inline throw_lightboundserror(mem, i:stop)
 end
@@ -666,7 +671,7 @@ So the fast path is known when the codec is compiled, for every field in turn.
     kind = codec_kind(T, enc)
     # `L ≥ N` is decided when the codec is compiled
     if L ≥ N || length(mem) ≥ N
-        result = kind isa Opaque ? decode_full(mem, T, enc) : decode_bits(kind, mem, T, enc)
+        result = kind isa BitsScheme ? decode_bits(kind, mem, T, enc) : decode_full(mem, T, enc)
         result isa Invalid && return result
         (x, n) = result
         # `n ≤ N`, so the rest has at least `L - N` bytes
@@ -758,11 +763,11 @@ As for [`decode_field`](@ref), when `output` is an `EncodeOutput{L}` with `L` at
     N = max_encoded_size(T, enc)
     mem = output.mem
     if L ≥ N || length(mem) ≥ N
-        n = if codec_kind(T, enc) isa Opaque
-            @? encode_full(mem, x, enc)
-        else
+        n = if codec_kind(T, enc) isa BitsScheme
             unsafe_encode_bits!(mem, 0, x, enc)
             N
+        else
+            @? encode_full(mem, x, enc)
         end
         return (n, EncodeOutput{max(L - N, 0)}(unsafe_suffix(mem, n + 1), output.offset + n))
     end
@@ -774,12 +779,15 @@ As for [`decode_field`](@ref), when `output` is an `EncodeOutput{L}` with `L` at
 end
 
 # The package calls hand-written codecs only through these two functions, which check the
-# byte count a codec returns. Callers trust it with `@inbounds`, e.g. to consume it from a
+# byte count a codec returns. They also call the codec of proxied types, which is part of
+# the package, so its byte count is not checked. Callers trust it with `@inbounds`, e.g. to consume it from a
 # reader or writer, or to slice the rest of a memory view.
 
 @inline function call_codec_try_decode(
         input::DecodeInput, ::Type{T}, enc::Encoding
     )::Union{Tuple{T, Int}, TooShort, Invalid} where {T}
+    scheme = codec_kind(T, enc)
+    scheme isa Proxy && return proxy_try_decode(input, T, scheme, enc)
     result = codec_try_decode(input, T, enc)
     result isa Union{TooShort, Invalid} && return result
     (x, n) = result
@@ -796,6 +804,8 @@ end
 @inline function call_codec_try_encode!(
         output::EncodeOutput, x::T, enc::Encoding
     )::Union{Int, TooShort, Invalid} where {T}
+    scheme = codec_kind(T, enc)
+    scheme isa Proxy && return proxy_try_encode!(output, x, scheme, enc)
     n = codec_try_encode!(output, x, enc)
     n isa Union{TooShort, Invalid} && return n
     # Check only what keeps a broken codec from causing undefined behaviour, see
