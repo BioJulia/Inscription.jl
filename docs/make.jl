@@ -14,6 +14,8 @@ makedocs(
     modules = [BitScribbling],
     repo = Documenter.Remotes.GitHub("BioJulia", "BitScribbling.jl"),
     sitename = "BitScribbling.jl",
+    # The API reference is deliberately a single page, so exempt it from the size limits
+    format = Documenter.HTML(; size_threshold_ignore = ["reference.md"]),
     doctest = true,
     # These two pages are recommended, you can add more as you wish
     pages = [

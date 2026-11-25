@@ -54,7 +54,7 @@ Many types can be converted to and from another type that already has a codec, o
 For example, a struct with padding can't be `BitsLoadable`, but it can be converted to a tuple of its parts,
 whose elements are encoded one after another without padding.
 Such a type can be declared a [`Proxy`](@ref BitScribbling.Proxy) of the other type, with `Proxy{P}()`, and implement
-[`BitScribbling.to_proxy`](@ref BitScribbling.to_proxy) and [`BitScribbling.try_from_proxy`](@ref BitScribbling.try_from_proxy).
+[`BitScribbling.try_to_proxy`](@ref BitScribbling.try_to_proxy) and [`BitScribbling.try_from_proxy`](@ref BitScribbling.try_from_proxy).
 Then it is encoded exactly as the proxy is. This works with any encoding, and it doesn't make the fields
 of a struct part of its encoding, so they can change without changing the encoding.
 

@@ -332,9 +332,15 @@ end
     kind = codec_kind(T, enc)
     if !(kind isa BitsScheme)
         @boundscheck check_start_index(mem, i)
-        rest = unsafe_suffix(ImmutableMemoryView(mem), i)
-        holds_any(length(rest), T, enc) || return decode_memory_short(rest, T, enc)
-        result = decode_full(rest, T, enc)
+        imem = ImmutableMemoryView(mem)
+        # The suffix is made after its length is checked, since it's cheaper to make when
+        # it is known not to be empty. `i` is compared to the length of `mem`, like callers
+        # that loop over `mem` do, so the compiler can remove the comparison.
+        if !holds_any(length(imem) - i + 1, T, enc)
+            i > length(imem) && return DecodeError(EndOfInput)
+            return decode_memory_short(nonempty_suffix(imem, i), T, enc)
+        end
+        result = decode_full(nonempty_suffix(imem, i), T, enc)
         result isa Invalid && return DecodeError(InvalidData)
         return result
     end
@@ -347,13 +353,13 @@ end
     return (x, n)
 end
 
-# The slow path of `try_decode_sized`: decode a T from all of `mem`, which is too short for
-# any encoding.
+# The slow path of `try_decode_sized`: decode a T from all of `mem`, which is not empty, but
+# not known to hold any encoding of a T.
 @inline function decode_memory_short(
         mem::ImmutableMemoryView{UInt8}, ::Type{T}, enc::Encoding
     )::Union{Tuple{T, Int}, DecodeError} where {T}
-    isempty(mem) && return DecodeError(EndOfInput)
-    result = decode_short(mem, T, enc, true)
+    # Since `mem` is not empty, the check of a codec that reads one byte is removed
+    result = call_codec_try_decode(MemoryInput{1}(mem, true), T, enc)
     result isa TooShort && return DecodeError(Truncated)
     result isa Invalid && return DecodeError(InvalidData)
     return result
@@ -464,9 +470,12 @@ end
     )::Union{Int, EncodeError} where {T}
     if !(codec_kind(T, enc) isa BitsScheme)
         @boundscheck check_start_index(mem, i)
-        rest = unsafe_suffix(mem, i)
-        holds_any(length(rest), T, enc) || return encode_memory_short(rest, x, enc)
-        result = encode_full(rest, x, enc)
+        # As in `try_decode_sized`, make the suffix after its length is checked. If `mem` has
+        # no room, the codec must still run, since it may return `Invalid`.
+        if !holds_any(length(mem) - i + 1, T, enc)
+            return encode_memory_short(unsafe_suffix(mem, i), x, enc)
+        end
+        result = encode_full(nonempty_suffix(mem, i), x, enc)
         result isa Invalid && return EncodeError(InvalidValue)
         return result
     end
@@ -587,6 +596,18 @@ end
     return nothing
 end
 
+# `mem[i:end]`, without checking that `i` is in `1:length(mem)`.
+# Cheaper than `unsafe_suffix`, which must handle that the suffix may be empty.
+@inline function nonempty_suffix(mem::ImmutableMemoryView{UInt8}, i::Int)
+    ref = @inbounds memoryref(MemoryViews.unsafe_memoryref(mem), i)
+    return ImmutableMemoryView(MemoryViews.unsafe_from_parts(ref, length(mem) - i + 1))
+end
+
+@inline function nonempty_suffix(mem::MutableMemoryView{UInt8}, i::Int)
+    ref = @inbounds memoryref(memoryref(mem), i)
+    return MemoryViews.unsafe_from_parts(ref, length(mem) - i + 1)
+end
+
 # `mem[i:end]`, without checking that `i` is in `1:length(mem)+1`.
 # Unlike slicing, this returns `mem` itself for i == 1, which is constant-folded.
 @inline unsafe_suffix(mem::MemoryView, i::Int) = last(@inbounds split_at(mem, i))
@@ -622,8 +643,9 @@ decoded from. Return [`Invalid()`](@ref Invalid) if the bytes are not a valid en
 
 Read `input` only through [`require_bytes`](@ref), [`peek_byte`](@ref) and
 [`decode_field`](@ref), and return their [`TooShort`](@ref) with [`@?`](@ref). The codec
-never handles a short input itself: the caller decides what `TooShort` means, e.g.
-an error for memory, or to wait for more bytes for a reader.
+never handles a short input itself: the functions buffer more bytes if the input is backed
+by a reader, and the caller decides what `TooShort` means, e.g. that the input is truncated,
+or that an element can't be decoded from the bytes buffered so far.
 
 An implementation must follow this contract:
 * **Pure.** The result depends only on the bytes it read from `input`.

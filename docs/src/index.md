@@ -6,7 +6,7 @@ end
 ```
 
 # BitScribbling.jl
-BitScribbling.jl provides abstractions for reading and writing values to byte arrays (via [MemoryViews.jl](https://github.com/BioJulia/MemoryViews.jl).jl) or to I/O (via [BufferIO.jl](https://github.com/BioJulia/BufferIO.jl).jl).
+BitScribbling.jl provides abstractions for reading and writing values to byte arrays (via [MemoryViews.jl](https://github.com/BioJulia/MemoryViews.jl)) or to I/O (via [BufferIO.jl](https://github.com/BioJulia/BufferIO.jl)).
 
 It can be considered a more powerful version of Base's `read(::IO, T)`, `write(::IO, ::T)` as well as `unsafe_load`/`unsafe_store!`.
 Alternatively, it can be viewed as an extension of BufferIO.jl, which only supports IO on bytes, to support IO for all types.
@@ -19,7 +19,6 @@ You might want to use this package if you find yourself:
 You probably don't need this package if:
 * Mostly do I/O by writing strings or raw arrays e.g. to log files,
 * Read/write specific formats like JSON, in which case you should use a package specific to that format.
-
 
 The major design goals of this package are:
 1. High performance. The abstractions of this package should be roughly on par with manual implementations using pointer operations and `reinterpret`. Users should rarely be discouraged from using BitScribbling abstractions due to performance.
@@ -64,10 +63,3 @@ BitScribbling.jl is more fundamental, in the sense that it could be used to impl
   struct from 64 bits in total. For now, the package assumes types are read or written as an integer number of bytes.
   Users can opt-in to padding to e.g. read/write an 18-bit primitive value as 24 bits (3 whole bytes).
   See the [Implementing a type](custom.md) page for details.
-
-* There are no built-in encodings of types like `String`, whose encodings have no upper limit on their length.
-  You can implement them for your own types, see [`BitScribbling.Unbounded`](@ref), but loading such a value
-  from a reader buffers all of its bytes before any are consumed.
-  To read data too large to buffer, load its length, then use [`load_every!`](@ref).
-
-* BitScribbling.jl requires Julia 1.11 or newer.

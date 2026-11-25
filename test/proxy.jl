@@ -18,7 +18,7 @@
     @test decode(MemoryView([0x00, 0x01, 0x00, 0x02]), Span, BigEndian()) === Span(0x0001, 0x0002)
     @test try_decode_next(MemoryView("é!"), 1, Glyph, UTF8()) === (Glyph('é'), 3)
 
-    # `try_from_proxy` rejects values with `nothing`, also nested and in bulk
+    # `try_from_proxy` rejects values with `Invalid()`, also nested and in bulk
     invalid = [0x00, 0x02, 0x00, 0x01]
     @test is_err(try_decode(MemoryView(invalid), Span, BigEndian()), InvalidData)
     @test is_err(try_decode(MemoryView(invalid), Nest, BigEndian()), InvalidData)
@@ -48,6 +48,28 @@
     @test String(buf[1:6]) == "a€é"
     @test decode_all!(MemoryView(Vector{Glyph}(undef, 3)), MemoryView(buf[1:6]), UTF8()) == (3, 6)
 
+    # `try_to_proxy` rejects values with `Invalid()`, also nested, in bulk and with IO
+    e = BigEndian()
+    @test encoding(Narrow(0x0102), e) == [0x01, 0x02]
+    @test decode(MemoryView([0x01, 0x02]), Narrow, e) === Narrow(0x0102)
+    @test encoding(NestNarrow(Narrow(0x0102)), e) == [0x01, 0x02]
+    for bad in (Narrow(-1), NestNarrow(Narrow(65536)), (0x01, Narrow(-1)))
+        @test try_encode!(MemoryView(zeros(UInt8, 8)), bad, e) === EncodeError(InvalidValue)
+        @test try_encode!(MemoryView(zeros(UInt8, 3)), bad, e) === EncodeError(InvalidValue)
+        @test_throws EncodeError(InvalidValue) encode!(MemoryView(zeros(UInt8, 8)), bad, e)
+        io = VecWriter()
+        @test try_store(io, bad, e) === EncodeError(InvalidValue)
+        @test_throws EncodeError(InvalidValue) store(io, bad, e)
+        @test isempty(io.vec)
+    end
+    narrows = [Narrow(1), Narrow(2), Narrow(-1), Narrow(3)]
+    buf = zeros(UInt8, 16)
+    @test encode_all!(MemoryView(buf), MemoryView(narrows), e) == (2, 4)
+    @test buf[1:4] == [0x00, 0x01, 0x00, 0x02]
+    io = VecWriter()
+    @test store_all(io, narrows, e) == (2, 4)
+    @test io.vec == [0x00, 0x01, 0x00, 0x02]
+
     # Proxies that can't be used
     message(T) =
     try
@@ -63,6 +85,8 @@
     end
     @test_throws ArgumentError encode!(SCRATCH, SelfProxied(0x01), BigEndian())
     @test_throws TypeError try_encode!(SCRATCH, WrongProxy(0x01), LittleEndian())
+    @test_throws TypeError try_encode!(SCRATCH, NothingProxy(0x01), LittleEndian())
+    @test_throws TypeError try_decode(MemoryView(zeros(UInt8, 8)), NothingProxy, LittleEndian())
 
     # A struct with a proxied field can't be a bits type, but a tuple can hold it
     @test_throws ArgumentError max_encoded_size(WithProxied, LittleEndian())

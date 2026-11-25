@@ -1,81 +1,112 @@
 """
     abstract type CodecScheme end
 
-Zero-sized trait struct, which says where the codec of a type `T` with an encoding comes
-from. Set it by adding a method to [`codec_scheme`](@ref) for your type `T`.
+Supertype of zero-sized trait structs that signals if a type / [`Encoding`](@ref) pair
+can have auto-derived codec implementations.
 
-The options are:
-* [`Manual()`](@ref Manual), the default: the codec is implemented by hand, see
-  [`Encoding`](@ref).
-* [`BitsLoadable()`](@ref BitsLoadable) and [`BitsStorable()`](@ref BitsStorable): the
-  codec copies the bits of `T` in memory. Only for the [`Endianness`](@ref) encodings.
-* [`Proxy{P}()`](@ref Proxy): `T` is encoded exactly as a value of the type `P` is.
+For some types / encoding pairs like `Float32` being encoded in [`BigEndian`](@ref),
+or [`LittleEndian`](@ref) the codec can be automatically implemented,
+because the codec is simply loading/storing with a pointer, and maybe byte swapping.
+For such a type `T`, users can declare:
+```julia
+BitScribbling.codec_scheme(::Type{T}, ::Endianness) = BitScribbling.BitsLoadable()
+```
+And then the codec T/Endianness is automatically implemented.
 
-See also: [`codec_scheme`](@ref)
+The fallback for `codec_scheme(T, E)` is [`Manual`](@ref). The current list of opt-in
+codec schemes beyond `Manual` are:
+* [`BitsLoadable`](@ref)
+* [`BitsStorable`](@ref)
+* [`Proxy`](@ref)
+
+See extended help for which type / encoding pairs are eligible to opt into these
+codec schemes.
+
+# Extended help
+A custom type `T` can opt into the following codec schemes. It should generally opt into the
+first applicable one on this list, as they are listed from most to least convenient.
+
+## `BitsLoadable`
+This codec scheme means `T` is transparently read/writable using a pointer load/store.
+`BitsLoadable` must be declared for the [`Endianness`](@ref) encodings only.
+To implement `BitsLoadable`, type `T` needs nothing other than to define:
+
+```
+BitScribbling.codec_scheme(::Type{T}, ::Endianness) = BitScribbling.BitsLoadable()
+```
+
+A type `T` can be `BitsLoadable` if:
+* `isbitstype(T)`,
+* `T` does not have size zero
+* If `T` is a struct, all its fields must be `BitsLoadable`
+* `T` must have no padding on any platform. The padding check is done by assuming
+   the alignment of any primitive is equal to the next power of two equal to or
+   larger than its bitsize, and that the alignment of any struct is equal to its largest field.
+   This is the most conservative possible rule.
+   This also rules out primitive types whose bit size is not a multiple of 8.
+* Its [`NATIVE_ENDIAN`](@ref) encoding is the same as its in-memory representation,
+  i.e. for `x::T`, the encoding is exactly equal to `reinterpret(UInt8, [x])`.
+* Every bit pattern is a valid `T`.
+
+## `BitsStorable`
+This codec scheme means `T` is transparently writeable using a pointer store, and is readable using
+a pointer load, except not all bitpatterns are valid, and therefore the bits must be checked before instantiation.
+`BitsStorable` must be declared for the [`Endianness`](@ref) encodings only.
+    
+To implement `BitsStorable`, type `T` needs to implement:
+
+```
+BitScribbling.codec_scheme(::Type{T}, ::Endianness) = BitScribbling.BitsStorable()
+BitScribbling.is_valid_bits(::Type{T}, ::NTuple{sizeof(T), UInt8}) = ...
+```
+
+`BitsStorable` has the same restrictions as `BitsLoadable`, except:
+* Not all bitpatterns need be valid
+* If it's a struct, all fields must only be recursively `BitsLoadable` OR `BitsStorable`.
+
+## `Proxy{P}`
+This codec scheme means `T` can be encoded/decoded via an instance of `P`.
+For example, a type
+`struct Foo; x::UInt32; y::UInt8; end` may be decoded via a `Tuple{UInt32, UInt8}`.
+
+To implement `Proxy{P}`, type `T` for encoding `E` needs to implement:
+
+```julia
+BitScribbling.codec_scheme(::Type{T}, ::E) = BitScribbling.Proxy{P}()
+BitScribbling.try_to_proxy(::T, ::E)::Union{P, Invalid} = ...
+BitScribbling.try_from_proxy(::Type{T}, ::P, ::E)::Union{T, Invalid} = ...
+```
+
+Any type can be `Proxy`, but it only makes sense to implement if `T` can be
+easily created from / used to create a `P`, which already has an encoding.
 """
 abstract type CodecScheme end
 
 """
     Manual() <: CodecScheme
 
-The default [`CodecScheme`](@ref): the codec of a type with an encoding is implemented by
-hand, see [`Encoding`](@ref).
+The default [`CodecScheme`](@ref): the codec of a type with an encoding is implemented by hand.
+
+See [`CodecScheme`](@ref), [`Encoding`](@ref).
 """
 struct Manual <: CodecScheme end
 
 """
     BitsLoadable() <: CodecScheme
 
-[`CodecScheme`](@ref) of types whose [`Endianness`](@ref) encodings are their bits in
-memory, and for which all bit patterns are valid. Examples include `UInt64` and `Float32`.
-Encoding and decoding is implemented by copying bytes, and swapping their order if the
-encoding is not [`NATIVE_ENDIAN`](@ref).
+The fastest [`CodecScheme`](@ref): the encoding in [`NATIVE_ENDIAN`](@ref) is its in-memory representation.
 
-A type `T` can be `BitsLoadable` if:
-* It is an `isbitstype` primitive type or struct;
-* its bit size is a multiple of 8, i.e. it occupies an integer number of bytes;
-* its little and big endian encodings are its in-memory representation, up to byte order;
-* every bit pattern is a valid `T`.
-
-It must only be declared for the `Endianness` encodings, e.g.
-`BitScribbling.codec_scheme(::Type{MyType}, ::Endianness) = BitScribbling.BitsLoadable()`.
-Declaring it for another encoding throws an `ArgumentError` when the codec is used.
-
-Declaring a struct `BitsLoadable` makes its layout, i.e. the order, types and number of
-its fields, part of its encoding. To encode a struct independently of its fields, use
-[`Proxy`](@ref) instead.
-
-See also: [`BitsStorable`](@ref)
-
-# Extended help
-## Structs
-An `isbitstype` struct `T` has three requirements to be `BitsLoadable` or `BitsStorable`,
-in addition to the above requrement that its encoding must equal its memory representation:
-
-1. All its fields must be `BitsLoadable` for `T` to be `BitsLoadable`, and its fields must
-   be `BitsLoadable` or `BitsStorable` for `T` to be `BitsStorable`. A field whose scheme
-   is `Manual` or `Proxy` is not encoded as its bits, so `T` can't be either.
-2. `T` must not have size zero
-3. `T` must have no padding on any platform. The padding check is done by assuming
-   the alignment of any primitive is equal to the next power of two equal to or
-   larger than its bitsize,
-   and that the alignment of any struct is equal to its largest field.
-   This is the most conservative possible rule.
+See [`CodecScheme`](@ref), [`Encoding`](@ref).
 """
 struct BitsLoadable <: CodecScheme end
 
 """
     BitsStorable() <: CodecScheme
 
-Like [`BitsLoadable`](@ref), but for types where some bit patterns are invalid, such as
-`Bool`. The type can be encoded by copying its bytes, but after the bytes are decoded or
-loaded, they must be validated with [`is_valid_bits`](@ref), which then must be
-implemented.
+The second-fastest [`CodecScheme`](@ref): For valid instances, the encoding in [`NATIVE_ENDIAN`](@ref)
+are their in-memory representation.
 
-The requirements are the same as for `BitsLoadable`, except that the fields of a struct
-may be `BitsLoadable` or `BitsStorable`.
-
-See also: [`is_valid_bits`](@ref)
+See [`CodecScheme`](@ref), [`Encoding`](@ref).
 """
 struct BitsStorable <: CodecScheme end
 
@@ -83,41 +114,9 @@ struct BitsStorable <: CodecScheme end
     Proxy{P}() <: CodecScheme
 
 [`CodecScheme`](@ref) of a type `T` that is encoded exactly as a value of the concrete type
-`P` is, with the same encoding. Then `P` must have a codec for that encoding, and these
-two functions must be implemented:
+`P` is, with the same encoding.
 
-* [`to_proxy(x::T, enc)::P`](@ref to_proxy), which converts the value to its proxy, and
-* [`try_from_proxy(::Type{T}, p::P, enc)::Union{T, Nothing}`](@ref try_from_proxy), which
-  converts the proxy back, or returns `nothing` if `p` is not a valid `T`.
-
-Proxies are the easiest way to encode a struct without making its fields part of its
-encoding. A common proxy is a tuple, whose elements are encoded one after another
-without padding. Unlike [`BitsLoadable`](@ref) structs, a proxied type is encoded element
-by element also in bulk, so loading many values is not a single memory copy.
-
-`P` must not be `T`, and `T` must not be part of a cycle of proxies.
-
-# Examples
-```jldoctest
-julia> struct Interval
-           lo::UInt16
-           hi::UInt16
-       end
-
-julia> BitScribbling.codec_scheme(::Type{Interval}, ::Endianness) = BitScribbling.Proxy{NTuple{2, UInt16}}()
-
-julia> BitScribbling.to_proxy(x::Interval, ::Endianness) = (x.lo, x.hi)
-
-julia> function BitScribbling.try_from_proxy(::Type{Interval}, (lo, hi)::NTuple{2, UInt16}, ::Endianness)
-           return lo ≤ hi ? Interval(lo, hi) : nothing
-       end
-
-julia> decode(MemoryView([0x00, 0x01, 0x00, 0x02]), Interval, BigEndian())
-Interval(0x0001, 0x0002)
-
-julia> try_decode(MemoryView([0x00, 0x02, 0x00, 0x01]), Interval, BigEndian())
-DecodeError(BitScribbling.DecodeErrorKinds.InvalidData)
-```
+See [`CodecScheme`](@ref), [`Encoding`](@ref).
 """
 struct Proxy{P} <: CodecScheme end
 
@@ -129,8 +128,9 @@ The [`CodecScheme`](@ref) of the type `T` with the encoding `enc`. Defaults to
 
 Add methods to it for your own types, e.g.
 `BitScribbling.codec_scheme(::Type{MyType}, ::Endianness) = BitScribbling.BitsLoadable()`.
+
 Unlike the methods of a hand-written codec, its methods may be defined for abstract
-encoding types, such as `Endianness` or `Encoding`. Its methods must be constant foldable.
+encoding types, such as `Endianness` or `Encoding`.
 
 See also: [`CodecScheme`](@ref)
 """
@@ -149,27 +149,35 @@ codec_scheme(::Type{Bool}, ::Endianness) = BitsStorable()
 codec_scheme(::Type{<:Enum}, ::Endianness) = BitsStorable()
 
 """
-    to_proxy(x::T, enc::Encoding)::P
+    try_to_proxy(x::T, ::E)::Union{P, Invalid} where {E <: Encoding}
 
-Convert `x` to its proxy, when the [`codec_scheme`](@ref) of `T` with `enc` is
-[`Proxy{P}()`](@ref Proxy). The result must be of type `P` exactly; it is not converted.
+Try constructing a `P` from `x`, when `codec_scheme(T, ::E) == Proxy{P}()`.
 
-Never call it directly; call e.g. [`try_encode!`](@ref).
+This method should be implemented only when the `CodecScheme` of `(T, E)` has been chosen as `Proxy{P}`,
+see [`CodecScheme`](@ref) for more details.
 
-See also: [`try_from_proxy`](@ref)
+Return [`Invalid()`](@ref Invalid) if `x` can't be represented as a `P`.
+Encoding `x` then fails with `InvalidValue`.
+
+It is not called directly, but via the encoding or storing functions.
+
+See also: [`try_from_proxy`](@ref), [`CodecScheme`](@ref)
 """
-function to_proxy end
+function try_to_proxy end
 
 """
-    try_from_proxy(::Type{T}, p::P, enc::Encoding)::Union{T, Nothing}
+    try_from_proxy(::Type{T}, p::P, enc::E)::Union{T, Invalid} where {E <: Encoding}
 
-Convert the proxy `p` back to a `T`, when the [`codec_scheme`](@ref) of `T` with `enc` is
-[`Proxy{P}()`](@ref Proxy). Return `nothing` if `p` is not a valid `T`, which makes
-decoding fail with `InvalidData`.
+Try constructing a `T` from `p::P`, when `codec_scheme(T, ::E) == Proxy{P}()`.
 
-Never call it directly; call e.g. [`try_decode`](@ref).
+This method should be implemented only when the `CodecScheme` of `(T, E)` has been chosen as `Proxy{P}`.
 
-See also: [`to_proxy`](@ref)
+Return [`Invalid()`](@ref Invalid) if `p` can't be converted to a `T`.
+Decoding a `T` then fails with `InvalidData`, even though the bytes are a valid encoding of a `P`.
+
+It is not called directly, but via the decoding or loading functions.
+
+See also: [`try_to_proxy`](@ref)
 """
 function try_from_proxy end
 
@@ -221,14 +229,14 @@ end
         input::DecodeInput, ::Type{T}, ::Proxy{P}, enc::Encoding
     )::Union{Tuple{T, Int}, TooShort, Invalid} where {T, P}
     (p, n, _) = @? decode_field(input, P, enc)
-    x = try_from_proxy(T, p, enc)
-    x === nothing && return Invalid()
-    return (x::T, n)
+    x = @? try_from_proxy(T, p, enc)::Union{T, Invalid}
+    return (x, n)
 end
 
 @inline function proxy_try_encode!(
         output::EncodeOutput, x, ::Proxy{P}, enc::Encoding
     )::Union{Int, TooShort, Invalid} where {P}
-    (n, _) = @? encode_field(output, to_proxy(x, enc)::P, enc)
+    p = @? try_to_proxy(x, enc)::Union{P, Invalid}
+    (n, _) = @? encode_field(output, p, enc)
     return n
 end

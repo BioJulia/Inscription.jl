@@ -1,8 +1,8 @@
 """
     module BitScribbling
 
-Encode and decode values, such as integers, floats, `Char`, structs, and types of variable
-size, to and from byte arrays and BufferIO's IO types.
+Encode and decode values, such as integers, floats, `Char`, structs
+to and from byte arrays and BufferIO's I/O types.
 """
 module BitScribbling
 
@@ -63,7 +63,7 @@ public Little,
     Manual,
     Proxy,
     codec_scheme,
-    to_proxy,
+    try_to_proxy,
     try_from_proxy,
     is_valid_bits,
     as_unsigned,

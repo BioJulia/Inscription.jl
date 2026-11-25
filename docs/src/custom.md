@@ -47,8 +47,10 @@ This simplifies the common case for e.g. `UInt32` where the endianness encoding 
 ### Proxies
 A type that can be converted to and from another type `P` with a codec can be encoded exactly as `P` is,
 with any encoding that `P` has a codec for, by declaring `codec_scheme` to be `Proxy{P}()`.
-Then, implement [`BitScribbling.to_proxy`](@ref BitScribbling.to_proxy) and [`BitScribbling.try_from_proxy`](@ref BitScribbling.try_from_proxy).
-The latter returns `nothing` if the proxy is not a valid value, which makes decoding fail with `InvalidData`.
+Then, implement [`BitScribbling.try_to_proxy`](@ref BitScribbling.try_to_proxy) and [`BitScribbling.try_from_proxy`](@ref BitScribbling.try_from_proxy).
+Both may return [`Invalid()`](@ref BitScribbling.Invalid): `try_to_proxy` if the value can't be represented by the proxy,
+which makes encoding fail with `InvalidValue`, and `try_from_proxy` if the proxy is not a valid value,
+which makes decoding fail with `InvalidData`.
 
 For example, this struct has padding in memory, so it can't be `BitsLoadable`, but it can be encoded
 as a tuple, which has no padding in its encoding:
@@ -62,7 +64,7 @@ struct Record
 end
 
 BitScribbling.codec_scheme(::Type{Record}, ::Endianness) = Proxy{Tuple{UInt8, UInt32}}()
-BitScribbling.to_proxy(x::Record, ::Endianness) = (x.kind, x.id)
+BitScribbling.try_to_proxy(x::Record, ::Endianness) = (x.kind, x.id)
 function BitScribbling.try_from_proxy(::Type{Record}, (kind, id)::Tuple{UInt8, UInt32}, ::Endianness)
     return Record(kind, id)
 end

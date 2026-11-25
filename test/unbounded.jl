@@ -20,9 +20,9 @@ struct Entry
 end
 const EntryTuple = Tuple{UInt32, LengthPrefixed, NulTerminated, Bool}
 BitScribbling.codec_scheme(::Type{Entry}, ::Endianness) = Proxy{EntryTuple}()
-BitScribbling.to_proxy(x::Entry, ::Endianness) = (x.id, x.name, x.alias, x.flag)
+BitScribbling.try_to_proxy(x::Entry, ::Endianness) = (x.id, x.name, x.alias, x.flag)
 function BitScribbling.try_from_proxy(::Type{Entry}, t::EntryTuple, ::Endianness)
-    return iszero(t[1]) ? nothing : Entry(t...)
+    return iszero(t[1]) ? Invalid() : Entry(t...)
 end
 
 # Recursive: a list, where each node is prefixed by whether it has a next node

@@ -159,21 +159,27 @@ A codec reads from `DecodeInput` only through these functions:
 
 These functions may return [`TooShort`](@ref), which can conveniently be returned
 early with [`@?`](@ref), as in `@? peek_byte(input, 1)`.
-When `TooShort` is returned from `codec_try_decode` and `DecodeInput` is backed by
-a reader, this signals that more bytes should be fetched from the reader.
+
+When backed by a reader, these functions buffer more bytes from the reader as needed, so
+the codec is not restarted. They then return `TooShort` only if the input ends too early.
+
+When backed by memory, the input is *partial* if more bytes may follow the memory, e.g.
+when bulk loading elements that are already buffered. Then, `TooShort` means that more
+bytes are needed to decide the result, and the element is decoded again later, from its
+start. Otherwise, `TooShort` means that the input ends too early.
 
 The input of a bounded codec ends after `max_encoded_size(T, enc)` bytes.
 
 # Extended help
 ## Invalidated views
-When backed by a reader, and `TooShort` requests more bytes, previous views of the
-`DecodeInput`'s data from `require_bytes` might be invalidated.
+When backed by a reader, buffering more bytes may invalidate previous views of the
+`DecodeInput`'s data from `require_bytes`.
 To be correct for all inputs, a codec must follow these rules:
 
-* [`require_bytes`](@ref), [`peek_byte`](@ref) and [`decode_field`](@ref) which reaches
-  beyond the number of earlier reads. E.g. if an earlier read reached index 10, future
-  reads reaching indices > 10 will invalidate previous views, but not reads reaching
-  only indices < 11.
+* A call to [`require_bytes`](@ref), [`peek_byte`](@ref) or [`decode_field`](@ref) which
+  reaches beyond all earlier reads may invalidate all previous views. E.g. if the
+  earlier reads reached index 10, reads reaching indices > 10 may invalidate previous
+  views, but not reads reaching only indices < 11.
 * All views are invalidated when `codec_try_decode` returns. So, do not return views,
   or otherwise let views escape from `codec_try_decode`.
 """

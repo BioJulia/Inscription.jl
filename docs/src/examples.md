@@ -1,7 +1,8 @@
 # Examples
 ### Reading and writing simple binary values:
 This works similar to Base's `read` and `write` (for readers), and
-`unsafe_load`, `unsafe_store!` (for memory).
+`unsafe_load`, `unsafe_store!` (for memory), although these functions
+are not unsafe.
 
 ```jldoctest
 using BufferIO: CursorReader, VecWriter
@@ -39,7 +40,7 @@ String(wtr.vec)
 ```
 
 ### Reading simple binary values in bulk
-This may be more efficient than the scalar operations above done in a loop
+This may be more efficient than the scalar operations above done in a loop.
 
 ```jldoctest
 using BufferIO: CursorReader, VecWriter
@@ -221,7 +222,7 @@ function BitScribbling.codec_scheme(::Type{Padded}, ::BitScribbling.Endianness)
     BitScribbling.Proxy{Tuple{UInt64, UInt8}}()
 end
 
-BitScribbling.to_proxy(x::Padded, ::BitScribbling.Endianness) = (x.a, x.b)
+BitScribbling.try_to_proxy(x::Padded, ::BitScribbling.Endianness) = (x.a, x.b)
 
 function BitScribbling.try_from_proxy(
         ::Type{Padded},

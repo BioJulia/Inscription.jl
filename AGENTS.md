@@ -3,14 +3,15 @@ This file provide guidance for coding agents working on the BitScribbling.jl rep
 
 BitScribbling is a Julia package that provides abstractions for reading and writing values, such as integers, floats, `Char` and structs (`isbits` or not), to and from memory, and to and from the reader and writer types of the BufferIO package.
 
-The major design criteria of the package are:
-1. Low overhead. Using the abstractions should ideally be as fast as manual code loading and storing via pointers.
-2. Pit of Success: Avoid APIs that makes implicit assumptions such as platform endianness, platform alignment or padding, and specific invalid bitpatterns of types. Also avoid slow fallback methods that may unexpectedly degrade performance, and APIs which encourage poor performance. 
+The major design goals of this package are:
+1. High performance. The abstractions of this package should be roughly on par with manual implementations using pointer operations and `reinterpret`. Users should rarely be discouraged from using BitScribbling abstractions due to performance.
+2. Present a hard-to-misuse API. BitScribbling APIs avoid making important behaviour implicit, such as platform endianness, platform-dependent struct padding, or performance traps due to slow fallback definitions. It attempts to guide users away from bugs.
 
-Explicit non-goals of this package are:
-1. A simple API. This package chooses complex pit-of-success APIs over a simple load/store abstraction that papers over the complexities mentioned above.
-2. General serialization of object graphs, and built-in encodings of types like `Dict`, `Vector` and `BigInt`. Users may implement codecs for encodings without a size bound (`Unbounded`), but the values are buffered whole when loaded.
-3. Support for specific formats unless particularly widespread. I.e., no explicit TOML or BSON support, but Char's UTF8 format is included.
+Explicit **non**-goals of this package are:
+1. A simple API. This package prefers semantically consistent, precise, efficient, and hard-to-misuse APIs over easy APIs.
+2. Reading/writing any type automatically via introspection, like Serialization.jl does.
+3. Reading/writing nested types like nested dicts, common in e.g. JSON, TOML and BSON formats.
+4. Support for any specific format like JSON or CSV. Instead, this package is for generic I/O of individual values, and can be used to implement formats.
 
 ## Code Conventions
 Performance is very important for this codebase.

@@ -417,9 +417,9 @@ struct Span
     hi::UInt16
 end
 BitScribbling.codec_scheme(::Type{Span}, ::Endianness) = Proxy{NTuple{2, UInt16}}()
-BitScribbling.to_proxy(x::Span, ::Endianness) = (x.lo, x.hi)
+BitScribbling.try_to_proxy(x::Span, ::Endianness) = (x.lo, x.hi)
 function BitScribbling.try_from_proxy(::Type{Span}, (lo, hi)::NTuple{2, UInt16}, ::Endianness)
-    return lo ≤ hi ? Span(lo, hi) : nothing
+    return lo ≤ hi ? Span(lo, hi) : Invalid()
 end
 # Has padding in memory, but not in its encoding
 struct Sparse
@@ -427,31 +427,54 @@ struct Sparse
     b::UInt32
 end
 BitScribbling.codec_scheme(::Type{Sparse}, ::Endianness) = Proxy{Tuple{UInt8, UInt32}}()
-BitScribbling.to_proxy(x::Sparse, ::Endianness) = (x.a, x.b)
+BitScribbling.try_to_proxy(x::Sparse, ::Endianness) = (x.a, x.b)
 BitScribbling.try_from_proxy(::Type{Sparse}, (a, b)::Tuple{UInt8, UInt32}, ::Endianness) = Sparse(a, b)
 # Encodings of varying size, with an encoding other than the byte orders
 struct Glyph
     c::Char
 end
 BitScribbling.codec_scheme(::Type{Glyph}, ::UTF8) = Proxy{Char}()
-BitScribbling.to_proxy(x::Glyph, ::UTF8) = x.c
+BitScribbling.try_to_proxy(x::Glyph, ::UTF8) = x.c
 BitScribbling.try_from_proxy(::Type{Glyph}, c::Char, ::UTF8) = Glyph(c)
 # A proxy of a proxied type
 struct Nest
     s::Span
 end
 BitScribbling.codec_scheme(::Type{Nest}, ::Endianness) = Proxy{Span}()
-BitScribbling.to_proxy(x::Nest, ::Endianness) = x.s
+BitScribbling.try_to_proxy(x::Nest, ::Endianness) = x.s
 BitScribbling.try_from_proxy(::Type{Nest}, s::Span, ::Endianness) = Nest(s)
 # A proxy for every encoding, which works for the encodings of the proxy
 struct Wrapped
     c::Char
 end
 BitScribbling.codec_scheme(::Type{Wrapped}, ::Encoding) = Proxy{Char}()
-BitScribbling.to_proxy(x::Wrapped, ::Encoding) = x.c
+BitScribbling.try_to_proxy(x::Wrapped, ::Encoding) = x.c
 BitScribbling.try_from_proxy(::Type{Wrapped}, c::Char, ::Encoding) = Wrapped(c)
+# Only values that fit in the proxy can be encoded
+struct Narrow
+    x::Int
+end
+BitScribbling.codec_scheme(::Type{Narrow}, ::Endianness) = Proxy{UInt16}()
+function BitScribbling.try_to_proxy(x::Narrow, ::Endianness)
+    return 0 ≤ x.x ≤ typemax(UInt16) ? x.x % UInt16 : Invalid()
+end
+BitScribbling.try_from_proxy(::Type{Narrow}, x::UInt16, ::Endianness) = Narrow(Int(x))
+# A proxy of a type that can't always be encoded
+struct NestNarrow
+    x::Narrow
+end
+BitScribbling.codec_scheme(::Type{NestNarrow}, ::Endianness) = Proxy{Narrow}()
+BitScribbling.try_to_proxy(x::NestNarrow, ::Endianness) = x.x
+BitScribbling.try_from_proxy(::Type{NestNarrow}, x::Narrow, ::Endianness) = NestNarrow(x)
 
 # Proxies that can't be used
+# Return `nothing` instead of `Invalid()`
+struct NothingProxy
+    x::UInt8
+end
+BitScribbling.codec_scheme(::Type{NothingProxy}, ::Endianness) = Proxy{UInt16}()
+BitScribbling.try_to_proxy(::NothingProxy, ::Endianness) = nothing
+BitScribbling.try_from_proxy(::Type{NothingProxy}, ::UInt16, ::Endianness) = nothing
 struct AbstractProxied end
 BitScribbling.codec_scheme(::Type{AbstractProxied}, ::Endianness) = Proxy{Integer}()
 struct SelfProxied
@@ -460,12 +483,12 @@ end
 BitScribbling.codec_scheme(::Type{SelfProxied}, ::Endianness) = Proxy{SelfProxied}()
 struct NotTypeProxied end
 BitScribbling.codec_scheme(::Type{NotTypeProxied}, ::Endianness) = Proxy{1}()
-# `to_proxy` returns a `UInt8`, not the proxy type
+# `try_to_proxy` returns a `UInt8`, not the proxy type
 struct WrongProxy
     x::UInt8
 end
 BitScribbling.codec_scheme(::Type{WrongProxy}, ::Endianness) = Proxy{UInt16}()
-BitScribbling.to_proxy(x::WrongProxy, ::Endianness) = x.x
+BitScribbling.try_to_proxy(x::WrongProxy, ::Endianness) = x.x
 BitScribbling.try_from_proxy(::Type{WrongProxy}, x::UInt16, ::Endianness) = WrongProxy(x % UInt8)
 # A field with a proxy is not encoded as its bits
 struct WithProxied

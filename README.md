@@ -5,7 +5,7 @@
 [![Documentation](https://img.shields.io/badge/docs-dev-blue.svg)](https://biojulia.github.io/BitScribbling.jl/dev)
 [![](https://codecov.io/gh/BioJulia/BitScribbling.jl/branch/master/graph/badge.svg)](https://codecov.io/gh/BioJulia/BitScribbling.jl)
 
-BitScribbling.jl provides abstractions for reading and writing values to byte arrays (via [MemoryViews.jl](https://github.com/BioJulia/MemoryViews.jl).jl) or to I/O (via [BufferIO.jl](https://github.com/BioJulia/BufferIO.jl).jl).
+BitScribbling.jl provides abstractions for reading and writing values to byte arrays (via [MemoryViews.jl](https://github.com/BioJulia/MemoryViews.jl)) or to I/O (via [BufferIO.jl](https://github.com/BioJulia/BufferIO.jl)).
 
 It can be considered a more powerful version of Base's `read(::IO, T)`, `write(::IO, ::T)` as well as `unsafe_load`/`unsafe_store!`.
 Alternatively, it can be viewed as an extension of BufferIO.jl, which only supports IO on bytes, to support IO for all types.
