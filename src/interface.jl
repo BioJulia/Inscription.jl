@@ -1,7 +1,10 @@
 """
-    max_encoded_size(::Type{T}, enc::Encoding)::Int
+    max_encoded_size(::Type{T}, enc::Encoding)::Union{Int, Unbounded}
 
-Upper bound on the number of bytes of any encoding of a value of type `T` with `enc`.
+Upper bound on the number of bytes of any encoding of a value of type `T` with `enc`,
+or [`Unbounded()`](@ref Unbounded) if there is none.
+Which of them is known when the caller is compiled.
+Throw an `ArgumentError` if there is no codec for `T` with `enc`.
 
 Do not add methods to this function. Implement a codec instead, see [`Encoding`](@ref).
 
@@ -14,7 +17,7 @@ julia> max_encoded_size(Char, UTF8())
 4
 ```
 """
-@inline function max_encoded_size(::Type{T}, enc::Encoding)::Int where {T}
+@inline function max_encoded_size(::Type{T}, enc::Encoding)::Union{Int, Unbounded} where {T}
     scheme = codec_kind(T, enc)
     return if scheme isa BitsScheme
         bits_encoded_size(T)
@@ -34,12 +37,44 @@ end
     return N
 end
 
+@inline val_size(x::Unbounded, ::Type, ::Encoding) = x
+val_size(::NoCodec, ::Type{T}, enc::Encoding) where {T} = throw_no_codec_error(T, enc)
 val_size(x, ::Type{T}, enc::Encoding) where {T} = throw_max_size_error(T, enc, x)
+
+# Whether T has a codec with `enc`. Constant-folded.
+@inline function has_codec(::Type{T}, enc::Encoding)::Bool where {T}
+    scheme = codec_kind(T, enc)
+    return if scheme isa BitsScheme
+        true
+    elseif scheme isa Proxy
+        proxy_has_codec(scheme, enc)
+    else
+        !(codec_max_encoded_size(T, enc) isa NoCodec)
+    end
+end
+
+@inline proxy_has_codec(::Proxy{P}, enc::Encoding) where {P} = has_codec(P, enc)
+
+@noinline function throw_no_codec_error(::Type{T}, enc::Encoding) where {T}
+    throw(
+        ArgumentError(
+            "There is no codec for `$T` with `$enc`. To add one, see `BitScribbling.codec_scheme` " *
+                "and `BitScribbling.Encoding`. If you added a method for this type to a function of " *
+                "BitScribbling, then the function you called doesn't use that method."
+        )
+    )
+end
+
+# Whether `len` bytes are known to hold any encoding of a T. Never so for unbounded types.
+@inline function holds_any(len::Int, ::Type{T}, enc::Encoding)::Bool where {T}
+    N = max_encoded_size(T, enc)
+    return N isa Int && len ≥ N
+end
 
 @noinline function throw_max_size_error(::Type{T}, enc::Encoding, x) where {T}
     return error(
         "`codec_max_encoded_size` for `$T` with `$enc` broke its contract: it must return " *
-            "`Val(n)` for a positive `n::Int`, but returned the size `$(repr(x))`"
+            "`Val(n)` for a positive `n::Int`, or `Unbounded()`, but returned the size `$(repr(x))`"
     )
 end
 
@@ -62,7 +97,8 @@ The error kind is:
 * `Truncated` if `mem` ends partway through an encoding;
 * `InvalidData` if the bytes are not a valid encoding.
 
-Do not add methods to this function. Implement a codec instead, see [`Encoding`](@ref).
+To customize it for your own type, implement a codec, see [`Encoding`](@ref), or add a method
+to it, see [Overloading functions](@ref overloading).
 
 See also: [`decode`](@ref), [`try_load`](@ref)
 
@@ -99,7 +135,8 @@ Like [`try_decode`](@ref), but throw the [`DecodeError`](@ref) instead of return
 `mem` is converted to `ImmutableMemoryView{UInt8}`.
 
 In `@inbounds` context, the caller must guarantee that `i ≥ 1`, and that at the `MemoryView`
-has at least length `length(mem) ≥ i - 1 + max_encoded_size(T, enc)`.
+has at least length `length(mem) ≥ i - 1 + max_encoded_size(T, enc)`. If that is
+[`Unbounded`](@ref), the caller must guarantee only that `i` is in `1:length(mem)+1`.
 
 See also: [`decode_next`](@ref)
 
@@ -158,6 +195,9 @@ DecodeError(BitScribbling.DecodeErrorKinds.EndOfInput)
         mem::MemoryView{UInt8}, i::Integer, ::Type{T}, enc::Encoding
     )::Union{Tuple{T, Int}, DecodeError} where {T}
     i = Int(i)::Int
+    # Without a codec, `try_decode_sized` calls the method of this function that the user
+    # added. There is none, or this method wouldn't have been called.
+    has_codec(T, enc) || throw_no_codec_error(T, enc)
     (x, n) = @? try_decode_sized(mem, i, T, enc)
     return (x, i + n)
 end
@@ -280,14 +320,20 @@ end
 # index argument to an `Int`, so the internal functions only handle `Int` indices.
 # Its checks are in `@boundscheck` blocks, so an `@inbounds` in a caller that propagates
 # it, such as `decode`, skips them. The `try_` functions don't propagate it.
+# Without a codec, calls the method of `try_decode_next` that the user added.
 @inline function try_decode_sized(
         mem::MemoryView{UInt8}, i::Int, ::Type{T}, enc::Encoding
     )::Union{Tuple{T, Int}, DecodeError} where {T}
+    if !has_codec(T, enc)
+        check_start_index(mem, i)
+        (x, next) = @? try_decode_next(mem, i, T, enc)
+        return (x::T, next - i)
+    end
     kind = codec_kind(T, enc)
     if !(kind isa BitsScheme)
         @boundscheck check_start_index(mem, i)
         rest = unsafe_suffix(ImmutableMemoryView(mem), i)
-        length(rest) ≥ max_encoded_size(T, enc) || return decode_memory_short(rest, T, enc)
+        holds_any(length(rest), T, enc) || return decode_memory_short(rest, T, enc)
         result = decode_full(rest, T, enc)
         result isa Invalid && return DecodeError(InvalidData)
         return result
@@ -321,11 +367,11 @@ end
     )::Union{Tuple{T, Int}, TooShort, Invalid} where {T}
     kind = codec_kind(T, enc)
     if !(kind isa BitsScheme)
-        length(mem) ≥ max_encoded_size(T, enc) && return decode_full(mem, T, enc)
+        holds_any(length(mem), T, enc) && return decode_full(mem, T, enc)
         return decode_short(mem, T, enc, ends)
     end
     # A bits type is decided by all of its bytes, so it's decoded the same either way
-    length(mem) < bits_encoded_size(T) && return TooShort(bits_encoded_size(T))
+    length(mem) < bits_encoded_size(T) && return TooShort()
     return decode_bits(kind, mem, T, enc)
 end
 
@@ -340,13 +386,13 @@ end
 
 # The fast path: decode with a codec from `mem`, which must hold at least
 # `max_encoded_size(T, enc)` bytes. Those decide the result, so the input ends after them,
-# also if more bytes may follow. The codec is compiled for a `DecodeInput{L}` with `L` the
+# also if more bytes may follow. The codec is compiled for a `MemoryInput{L}` with `L` the
 # size, so the checks of its reads within the first `L` bytes are removed.
 @inline function decode_full(
         mem::ImmutableMemoryView{UInt8}, ::Type{T}, enc::Encoding
     )::Union{Tuple{T, Int}, Invalid} where {T}
     L = max_encoded_size(T, enc)
-    input = DecodeInput{L}(@inbounds(MemoryViews.truncate(mem, L)), true)
+    input = MemoryInput{L}(@inbounds(MemoryViews.truncate(mem, L)), true)
     result = call_codec_try_decode(input, T, enc)
     result isa TooShort && throw_too_short_error(codec_try_decode, T, enc)
     return result
@@ -359,7 +405,7 @@ end
 @inline function decode_short(
         mem::ImmutableMemoryView{UInt8}, ::Type{T}, enc::Encoding, ends::Bool
     )::Union{Tuple{T, Int}, TooShort, Invalid} where {T}
-    return call_codec_try_decode(DecodeInput{0}(mem, ends), T, enc)
+    return call_codec_try_decode(MemoryInput{0}(mem, ends), T, enc)
 end
 
 """
@@ -381,7 +427,8 @@ would have covered.
 
 On success, only the bytes of the encoding are written, no extra bytes.
 
-Do not add methods to this function. Implement a codec instead, see [`Encoding`](@ref).
+To customize it for your own type, implement a codec, see [`Encoding`](@ref), or add a method
+to it, see [Overloading functions](@ref overloading).
 
 See also: [`encode!`](@ref), [`store`](@ref)
 
@@ -406,7 +453,7 @@ EncodeError(BitScribbling.EncodeErrorKinds.InsufficientSpace)
 end
 
 @inline function try_encode!(mem::MutableMemoryView{UInt8}, x, enc::Encoding)
-    return _try_encode!(mem, 1, x, enc)
+    return try_encode!(mem, 1, x, enc)
 end
 
 # The implementation of `try_encode!`. Its checks are in `@boundscheck` blocks, so an
@@ -418,7 +465,7 @@ end
     if !(codec_kind(T, enc) isa BitsScheme)
         @boundscheck check_start_index(mem, i)
         rest = unsafe_suffix(mem, i)
-        length(rest) ≥ max_encoded_size(T, enc) || return encode_memory_short(rest, x, enc)
+        holds_any(length(rest), T, enc) || return encode_memory_short(rest, x, enc)
         result = encode_full(rest, x, enc)
         result isa Invalid && return EncodeError(InvalidValue)
         return result
@@ -444,7 +491,7 @@ end
 # Encode `x` at the start of `mem`, the counterpart of `decode_start`
 @inline function encode_start(mem::MutableMemoryView{UInt8}, x::T, enc::Encoding)::Union{Int, TooShort, Invalid} where {T}
     if !(codec_kind(T, enc) isa BitsScheme)
-        length(mem) ≥ max_encoded_size(T, enc) && return encode_full(mem, x, enc)
+        holds_any(length(mem), T, enc) && return encode_full(mem, x, enc)
         return encode_short(mem, x, enc)
     end
     n = bits_encoded_size(T)
@@ -495,8 +542,13 @@ Base.@propagate_inbounds function encode!(
         mem::MutableMemoryView{UInt8}, i::Integer, x::T, enc::Encoding
     )::Int where {T}
     i = Int(i)::Int
-    # Calls `_try_encode!` directly, so that `@inbounds` reaches its checks
-    result = _try_encode!(mem, i, x, enc)
+    # Calls `_try_encode!` directly, so that `@inbounds` reaches its checks. Without a codec,
+    # calls the method of `try_encode!` that the user added.
+    result = if has_codec(T, enc)
+        _try_encode!(mem, i, x, enc)
+    else
+        try_encode!(mem, i, x, enc)::Union{Int, EncodeError}
+    end
     result isa EncodeError && throw_encode_failure(mem, i, T, enc, result)
     return result
 end
@@ -541,7 +593,7 @@ end
 
 
 """
-    codec_max_encoded_size(::Type{T}, ::E)::Val{N}
+    codec_max_encoded_size(::Type{T}, ::E)::Union{Val{N}, Unbounded}
 
 Extension point of a hand-written codec for the value type `T` and the concrete encoding
 type `E`, see [`Encoding`](@ref). Never call it directly; call
@@ -550,13 +602,14 @@ type `E`, see [`Encoding`](@ref). Never call it directly; call
 Return `Val(N)`, where `N::Int` is the maximum number of bytes of any encoding of a `T`.
 `N` must be positive, since every encoding takes at least one byte. It must be a
 constant, since codecs are compiled for inputs and outputs of `N` bytes, see
-[`DecodeInput`](@ref).
+[`DecodeInput`](@ref). If the encodings have no maximal size, return
+[`Unbounded()`](@ref Unbounded).
 
 Storing into `AbstractBufWriter` buffers this many bytes before encoding.
 The input of [`codec_try_decode`](@ref) ends after this many bytes, also if more
 bytes follow.
 """
-function codec_max_encoded_size end
+codec_max_encoded_size(::Type, ::Encoding) = NoCodec()
 
 """
     codec_try_decode(input::DecodeInput, ::Type{T}, ::E)::Union{Tuple{T, Int}, TooShort, Invalid}
@@ -609,8 +662,8 @@ end
 ```
 
 When loading from a reader whose buffer holds the bytes `"12"`, `peek_byte(input, 3)`
-returns `TooShort(3)`, so the reader buffers a third byte, which may be another digit.
-When `"12"` is the complete input, it returns `nothing`, and the result is `12`.
+makes the reader buffer a third byte, which may be another digit. When the reader is at
+EOF after `"12"`, it returns `nothing`, and the result is `12`.
 """
 function codec_try_decode end
 
@@ -624,15 +677,59 @@ Get the first `n` bytes of `input`, as a memory view of length `n`, or
 When `n` is a constant of at most [`max_encoded_size`](@ref), this can't fail on the
 fast path, and is compiled to no code. The view's length is then a constant, so indexing
 it with constant indices needs no `@inbounds`.
+
+The view may be invalidated by later reads of the input, and this function may invalidate
+earlier views, see [`DecodeInput`](@ref).
 """
-@inline function require_bytes(input::DecodeInput{L}, n::Integer) where {L}
-    n = Int(n)::Int
-    n < 0 && throw_negative_count(n)
+@inline function require_bytes(input::MemoryInput{L}, n::Integer) where {L}
+    n = byte_count(n)
     mem = input.mem
     # `n ≤ L` is decided when the codec is compiled, if `n` is a constant
-    (n ≤ L || n ≤ length(mem)) || return TooShort(input.offset + n)
+    (n ≤ L || n ≤ length(mem)) || return TooShort()
     return @inbounds MemoryViews.truncate(mem, n)
 end
+
+@inline function require_bytes(input::ReaderInput, n::Integer)
+    n = byte_count(n)
+    (; io, offset, stop) = input
+    buffer = get_buffer(io)::ImmutableMemoryView{UInt8}
+    # If the input ends before `n` bytes, buffer all of it, so that a codec that asks for
+    # more bytes than its maximal size is told apart from a reader that is at EOF
+    ends_before = n > stop - offset
+    needed = ends_before ? stop : offset + n
+    if length(buffer) < needed
+        buffer = fill_at_least(io, needed)
+        length(buffer) < needed && return TooShort()
+    end
+    ends_before && return TooShort()
+    return @inbounds buffer[(offset + 1):needed]
+end
+
+# The count given to `require_bytes`, e.g. a length read from the data. No input has more
+# than `typemax(Int)` bytes, so larger counts make the input too short, and don't overflow.
+@inline function byte_count(n::Integer)::Int
+    n < 0 && throw_negative_count(n)
+    return n > typemax(Int) ? typemax(Int) : Int(n)::Int
+end
+
+# Buffer at least `n` bytes of `io`, or all bytes up to EOF, and return the buffer.
+# `n` may come from corrupt data, and readers may allocate all of the requested size, so
+# the buffer is filled in steps proportional to the bytes that have arrived.
+# Inlined, like `load_slow`, since refilling was measured to be slower with them outlined.
+# `peek_value` is not inlined, so the callers' code stays small.
+@inline function fill_at_least(io::AbstractBufReader, n::Int)::ImmutableMemoryView{UInt8}
+    buffer = get_buffer(io)::ImmutableMemoryView{UInt8}
+    while length(buffer) < n
+        step = min(n, max(2 * length(buffer), MIN_FILL_STEP))
+        new_buffer = get_nonempty_buffer(io, step)
+        new_buffer === nothing && return get_buffer(io)::ImmutableMemoryView{UInt8}
+        length(new_buffer) < step && throw_short_buffer_error(io, step, length(new_buffer))
+        buffer = new_buffer
+    end
+    return buffer
+end
+
+const MIN_FILL_STEP = 1 << 16
 
 """
     peek_byte(input::DecodeInput, i::Integer)::Union{UInt8, Nothing, TooShort}
@@ -640,16 +737,31 @@ end
 Get the byte at index `i` of `input`, or `nothing` if the input ends before it. `i` must
 be positive. Use with [`@?`](@ref) in [`codec_try_decode`](@ref).
 
-If the input is partial, see [`DecodeInput`](@ref), and byte `i` hasn't arrived yet,
-return [`TooShort`](@ref), meaning that more bytes are needed. So `nothing`
-always means that the input ends before byte `i`.
+If the input is partial, see [`DecodeInput`](@ref), and doesn't hold byte `i` yet, return
+[`TooShort`](@ref). So `nothing` always means that the input ends before byte `i`.
+
+May invalidate views of the input, see [`DecodeInput`](@ref).
 """
-@inline function peek_byte(input::DecodeInput{L}, i::Integer) where {L}
+@inline function peek_byte(input::MemoryInput{L}, i::Integer) where {L}
     i = Int(i)::Int
     mem = input.mem
     @boundscheck i ≥ 1 || throw_lightboundserror(mem, i)
     (i ≤ L || i ≤ length(mem)) && return @inbounds mem[i]
-    return input.ends ? nothing : TooShort(input.offset + i)
+    return input.ends ? nothing : TooShort()
+end
+
+@inline function peek_byte(input::ReaderInput, i::Integer)
+    i = Int(i)::Int
+    (; io, offset, stop) = input
+    @boundscheck i ≥ 1 || throw_lightboundserror(1:(stop - offset), i)
+    i > stop - offset && return nothing
+    buffer = get_buffer(io)::ImmutableMemoryView{UInt8}
+    needed = offset + i
+    if length(buffer) < needed
+        buffer = fill_at_least(io, needed)
+        length(buffer) < needed && return nothing
+    end
+    return @inbounds buffer[needed]
 end
 
 """
@@ -661,31 +773,69 @@ them. Else, return [`TooShort`](@ref) or [`Invalid()`](@ref Invalid). Use
 with [`@?`](@ref) in [`codec_try_decode`](@ref), for encodings that contain the
 encodings of other values.
 
-When `input` is a `DecodeInput{L}` with `L` at least `max_encoded_size(T, enc)`, the `T`
-is decoded on the fast path, and `rest` is a `DecodeInput{L - max_encoded_size(T, enc)}`.
+May invalidate views of the input, see [`DecodeInput`](@ref).
+
+When `input` is known to hold at least `max_encoded_size(T, enc)` bytes, the `T` is decoded
+on the fast path, and `rest` is known to hold the number of bytes that remain.
 So the fast path is known when the codec is compiled, for every field in turn.
 """
-@inline function decode_field(input::DecodeInput{L}, ::Type{T}, enc::Encoding) where {L, T}
+@inline function decode_field(input::MemoryInput{L}, ::Type{T}, enc::Encoding) where {L, T}
     N = max_encoded_size(T, enc)
     mem = input.mem
     kind = codec_kind(T, enc)
     # `L ≥ N` is decided when the codec is compiled
-    if L ≥ N || length(mem) ≥ N
+    if N isa Int && (L ≥ N || length(mem) ≥ N)
         result = kind isa BitsScheme ? decode_bits(kind, mem, T, enc) : decode_full(mem, T, enc)
         result isa Invalid && return result
         (x, n) = result
         # `n ≤ N`, so the rest has at least `L - N` bytes
-        return (x, n, DecodeInput{max(L - N, 0)}(unsafe_suffix(mem, n + 1), input.ends, input.offset + n))
+        return (x, n, MemoryInput{max(L - N, 0)}(unsafe_suffix(mem, n + 1), input.ends))
     end
     result = decode_start(mem, T, enc, input.ends)
-    # The count of `TooShort` is from the start of `mem`
-    result isa TooShort && return TooShort(input.offset + result.needed)
-    result isa Invalid && return result
+    result isa Union{TooShort, Invalid} && return result
     (x, n) = result
-    return (x, n, DecodeInput{0}(unsafe_suffix(mem, n + 1), input.ends, input.offset + n))
+    return (x, n, MemoryInput{0}(unsafe_suffix(mem, n + 1), input.ends))
 end
 
-@noinline throw_negative_count(n::Int) = throw(ArgumentError("expected a non-negative count, got $n"))
+@inline function decode_field(input::ReaderInput, ::Type{T}, enc::Encoding) where {T}
+    result = decode_reader(input, T, enc, max_encoded_size(T, enc))
+    result isa Union{TooShort, Invalid} && return result
+    (x, n) = result
+    return (x, n, ReaderInput(input.io, input.offset + n, input.stop))
+end
+
+# Decode a T from the start of `input`, filling the buffer of its reader as needed.
+@inline function decode_reader(
+        input::ReaderInput, ::Type{T}, enc::Encoding, ::Unbounded
+    )::Union{Tuple{T, Int}, TooShort, Invalid} where {T}
+    return call_codec_try_decode(input, T, enc)
+end
+
+@inline function decode_reader(
+        input::ReaderInput, ::Type{T}, enc::Encoding, N::Int
+    )::Union{Tuple{T, Int}, TooShort, Invalid} where {T}
+    kind = codec_kind(T, enc)
+    if kind isa BitsScheme
+        return decode_bits(kind, (@? require_bytes(input, N)), T, enc)
+    elseif n_buffered(input) ≥ N
+        # No need to fill the buffer, so use the fast path
+        buffer = get_buffer(input.io)::ImmutableMemoryView{UInt8}
+        return decode_full(unsafe_suffix(buffer, input.offset + 1), T, enc)
+    end
+    # As for memory, the input of a bounded codec ends after N bytes
+    field = ReaderInput(input.io, input.offset, min(input.stop, input.offset + N))
+    result = call_codec_try_decode(field, T, enc)
+    result isa TooShort && n_buffered(field) ≥ N && throw_too_short_error(codec_try_decode, T, enc)
+    return result
+end
+
+# The number of bytes that the codec may have read from the input
+@inline n_buffered(input::MemoryInput) = length(input.mem)
+@inline function n_buffered(input::ReaderInput)
+    return min(input.stop, length(get_buffer(input.io)::ImmutableMemoryView{UInt8})) - input.offset
+end
+
+@noinline throw_negative_count(n::Integer) = throw(ArgumentError("expected a non-negative count, got $n"))
 
 """
     codec_try_encode!(output::EncodeOutput, x::T, ::E)::Union{Int, TooShort, Invalid}
@@ -763,7 +913,7 @@ As for [`decode_field`](@ref), when `output` is an `EncodeOutput{L}` with `L` at
 @inline function encode_field(output::EncodeOutput{L}, x::T, enc::Encoding) where {L, T}
     N = max_encoded_size(T, enc)
     mem = output.mem
-    if L ≥ N || length(mem) ≥ N
+    if N isa Int && (L ≥ N || length(mem) ≥ N)
         n = if codec_kind(T, enc) isa BitsScheme
             unsafe_encode_bits!(mem, 0, x, enc)
             N
@@ -796,7 +946,7 @@ end
     # loops, see `valid_count`. LLVM often removes this check, when the codec has checked
     # the length itself. Its other contract violations are its own bugs, and are not
     # caught here.
-    len = length(input.mem)
+    len = n_buffered(input)
     valid_count(n, len) || throw_count_error(codec_try_decode, T, enc, n, len)
     return (x, n)
 end

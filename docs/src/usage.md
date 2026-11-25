@@ -37,7 +37,7 @@ If `i` is omitted, it defaults to `1`.
 
 Example: `encode!(zeros(UInt8, 4), UInt32(55), LittleEndian()) === 4`
 
-To find the number of bytes a value `x` takes up in some encoding, encode it: `try_encode!` returns the number of bytes written. To only find the size, encode `x` into scratch memory of [`max_encoded_size`](@ref) bytes, and reuse the same scratch memory for many values, rather than allocating it for each. There is no function that gives the size without encoding, since it would duplicate the codec, and could disagree with it.
+To find the number of bytes a value `x` takes up in some encoding, encode it: `try_encode!` returns the number of bytes written. To only find the size, encode `x` into scratch memory of [`max_encoded_size`](@ref) bytes, and reuse the same scratch memory for many values, rather than allocating it for each. If `max_encoded_size` is [`BitScribbling.Unbounded`](@ref), there is no such size, so [`store`](@ref) `x` into a `BufferIO.VecWriter`, which grows as needed, instead. There is no function that gives the size without encoding, since it would duplicate the codec, and could disagree with it.
 
 ### Decoding values
 The decoding signature is generally: `(try_)decode(_exact,_next)(mem, [i::Integer,] ::Type{T}, enc::Encoding)`, and they mean: Decode a `T` from `mem` starting at position `i`, with the given `Encoding`, and return the `T` (or an error, for the `try_` variant).

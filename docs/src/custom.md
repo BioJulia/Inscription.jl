@@ -16,11 +16,11 @@ Users may define arbitrary `Encoding`s and implement codecs for them.
 
 This API consists of three mandatory methods.
 See their docstrings for details (click them to go to their docstring in this documentation).
-* [`BitScribbling.codec_max_encoded_size`](@ref) gives the maximal size in bytes for the encoding of any instance of a type, as a `Val`.
+* [`BitScribbling.codec_max_encoded_size`](@ref) gives the maximal size in bytes for the encoding of any instance of a type, as a `Val`, or [`BitScribbling.Unbounded`](@ref) if there is none, as for strings.
 * [`BitScribbling.codec_try_decode`](@ref) attempts to decode an instance of `T` from a [`BitScribbling.DecodeInput`](@ref).
 * [`BitScribbling.codec_try_encode!`](@ref) attempts to encode an instance of `T` into an [`BitScribbling.EncodeOutput`](@ref).
 
-`codec_try_decode` reads its input through [`BitScribbling.require_bytes`](@ref), [`BitScribbling.peek_byte`](@ref) and [`BitScribbling.decode_field`](@ref), and `codec_try_encode!` writes its output through [`BitScribbling.reserve_bytes`](@ref) and [`BitScribbling.encode_field`](@ref). When loading from an `AbstractBufReader`, these make the reader wait for exactly the bytes the codec reads, so a codec for a variable-length encoding, like `Char`'s `UTF8` encoding, doesn't make loading wait for the maximal number of bytes of any instance of `T`. A codec is compiled twice: for inputs and outputs known to hold the maximal number of bytes, where the checks of these functions are removed, and for shorter ones, near the end of the data.
+`codec_try_decode` reads its input through [`BitScribbling.require_bytes`](@ref), [`BitScribbling.peek_byte`](@ref) and [`BitScribbling.decode_field`](@ref), and `codec_try_encode!` writes its output through [`BitScribbling.reserve_bytes`](@ref) and [`BitScribbling.encode_field`](@ref). When loading from an `AbstractBufReader`, these make the reader wait for exactly the bytes the codec reads, so a codec for a variable-length encoding, like `Char`'s `UTF8` encoding, doesn't make loading wait for the maximal number of bytes of any instance of `T`. A codec is compiled several times: for memory known to hold the maximal number of bytes, where the checks of these functions are removed; for shorter memory, near the end of the data; and for readers whose buffer must be filled. When it must be filled, views from `require_bytes` may be invalidated by later reads, see [`BitScribbling.DecodeInput`](@ref).
 
 ## Deriving codecs automatically
 Instead of implementing a codec, a type can get one from its [`CodecScheme`](@ref BitScribbling.CodecScheme), by adding a method to
@@ -74,8 +74,91 @@ such as [`decode_all!`](@ref), can't copy the memory of many values at once, as 
 for `BitsLoadable` types.
 
 If no other way applies, the codec has to be manually implemented,
-as described above. That is always a valid option for any type whose encodings have a
-bounded size, also for types that are not bitstypes.
+as described above. That is always a valid option, also for types that are not bitstypes,
+and for types whose encodings have no maximal size.
+
+## [Overloading functions](@id overloading)
+A codec gives a type all the functions of BitScribbling.jl, and it can be nested in tuples, proxies and other codecs.
+But it isn't always the fastest option. For example, a codec reads a string that is terminated by some byte with
+[`BitScribbling.peek_byte`](@ref), one byte at a time, where e.g. `BufferIO.buffer_until` is much faster for long strings.
+
+In such cases, you may add methods for your type to the functions below, implemented directly with BufferIO and MemoryViews.
+There are two cases:
+
+* **The type has a codec.** Then the method is an optimization, and must behave exactly like the function would without it.
+  The other functions may or may not use the method.
+* **The type has no codec.** Then only the function itself, and the functions that the table below says use it, work for the type.
+  Adding methods to `try_decode_next`, `try_encode!`, `try_load` and `try_store` is enough for all functions that aren't bulk functions.
+  The others throw an `ArgumentError`. Values of the type can't be nested in tuples, proxies or the codecs of other types.
+
+### Which functions use which
+| Method added to     | Also used by                         | Function that reports errors |
+|:------------------- |:------------------------------------ |:---------------------------- |
+| `try_decode`        | `try_decode` without an index        |                              |
+| `try_decode_next`   | Without a codec: `try_decode`, `decode`, `decode_next`, `try_decode_exact`, `decode_exact`, `try_load_exact`, `load_exact` | |
+| `try_decode_exact`  | `try_decode_exact` without an index, `try_load_exact`, `load_exact` | |
+| `decode`            | `decode` without an index            |                              |
+| `decode_next`       |                                      |                              |
+| `decode_exact`      | `decode_exact` without an index      |                              |
+| `try_encode!`       | `try_encode!` without an index. Without a codec: `encode!` | |
+| `encode!`           | `encode!` without an index           |                              |
+| `try_load`          | `load`                               |                              |
+| `try_load_exact`    | `load_exact`                         |                              |
+| `try_store`         | Without a codec: `store`             |                              |
+| `store`             |                                      |                              |
+| `decode_all!`       | `decode_every!`                      | `try_decode_next`            |
+| `encode_all!`       | `encode_every!`, and `store_into` of types with a codec | `try_encode!` |
+| `load_into!`        | `load_all!`, `load_every!`           | `try_load`                   |
+| `store_into`        | `store_all`, `store_every`           | `try_store`                  |
+
+The functions that end in `_every` call the function in the last column to get the error of the element that failed.
+Without a codec, also add a method to that, or they throw an `ArgumentError` instead of the error.
+Functions with arguments that are converted, such as a `Vector{UInt8}`, and the functions in the modules
+`BitScribbling.Little` and `BitScribbling.Big`, use the method of the function of the same name.
+With a codec, `decode`, `encode!` and `store` do not use the methods of the `try_` functions.
+
+### Signatures
+To avoid method ambiguities, and methods that are not called for some arguments:
+* Let the types of the memory be `MemoryView{UInt8}` for bytes that are only read, and `MutableMemoryView{UInt8}` for bytes
+  that are written. Likewise, let the elements be `MemoryView{MyType}` and `MutableMemoryView{MyType}`.
+  Do not leave the argument untyped.
+* Let the type of indices and byte counts be `Integer`, not `Int`.
+* Let the type of IOs be `AbstractBufReader` or `AbstractBufWriter`.
+* Define the methods for a concrete type and a concrete encoding, at least one of which is defined in your package.
+
+For example, for strings that are terminated by a zero byte:
+
+```julia
+using BitScribbling, BufferIO
+using BitScribbling.DecodeErrorKinds: EndOfInput, Truncated
+
+struct CStr
+    s::String
+end
+
+function BitScribbling.try_load(io::AbstractBufReader, ::Type{CStr}, ::LittleEndian)
+    buffer = buffer_until(io, 0x00)
+    # The buffer can't grow enough
+    buffer === nothing && throw(IOError(IOErrorKinds.BufferTooShort))
+    isempty(buffer) && return DecodeError(EndOfInput)
+    last(buffer) == 0x00 || return DecodeError(Truncated)
+    x = CStr(String(buffer[1:(end - 1)]))
+    consume(io, length(buffer))
+    return x
+end
+```
+
+This is enough for `try_load` and `load` to work.
+
+### What the methods must do
+* Return what the docstring of the function says, also in the case of errors.
+* Load and store every element all-or-nothing: an element that fails consumes nothing from the IO.
+  `load_every!` and the like call another function to get the error of that element, so if part of it was
+  consumed, they may continue in the middle of the data.
+* `load_into!`, `store_into`, `decode_all!` and `encode_all!` must return zero elements only if the destination or source array is empty,
+  the IO is at EOF, or the next element fails. Otherwise, the functions that use them stop early.
+* Return the number of elements, and of bytes, that were actually processed. The element counts, and the byte counts where memory safety depends on them, are
+  checked, and an `ErrorException` is thrown if they are out of range, but values in range are trusted.
 
 ## Visual guide
 ![Guide to implementing a codec](assets/types.svg)

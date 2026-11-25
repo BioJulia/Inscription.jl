@@ -62,7 +62,7 @@ for (mod, E, desc) in (
             AbstractBufReader, AbstractBufWriter,
             DecodeError, DecodeErrorKinds, EncodeError, EncodeErrorKinds, @?
 
-        export $(names...), DecodeError, DecodeErrorKinds, EncodeError, EncodeErrorKinds, @?
+        export BitScribbling, $(names...), DecodeError, DecodeErrorKinds, EncodeError, EncodeErrorKinds, @?
         end
     end
     for (f, args) in convenience_functions

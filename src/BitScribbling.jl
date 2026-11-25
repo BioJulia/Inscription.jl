@@ -1,8 +1,8 @@
 """
     module BitScribbling
 
-Encode and decode values whose encodings have a bounded size, such as integers, floats,
-`Char` and structs, to and from byte arrays and BufferIO's IO types.
+Encode and decode values, such as integers, floats, `Char`, structs, and types of variable
+size, to and from byte arrays and BufferIO's IO types.
 """
 module BitScribbling
 
@@ -15,6 +15,7 @@ using BufferIO: BufferIO,
     IOErrorKinds,
     get_buffer,
     get_nonempty_buffer,
+    is_expandable,
     consume
 
 export Encoding,
@@ -67,6 +68,7 @@ public Little,
     is_valid_bits,
     as_unsigned,
     codec_max_encoded_size,
+    Unbounded,
     codec_try_decode,
     codec_try_encode!,
     DecodeInput,

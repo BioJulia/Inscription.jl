@@ -112,11 +112,12 @@ end
     end
     @test occursin("`codec_try_decode` for `Int16` with `Liar()` broke its contract", msg)
     @test occursin("byte count of -1", msg)
-    # A count of zero is caught also on the slow path, and when loading from an empty
-    # reader, where the codec is called to learn how many bytes to buffer
+    # A count of zero is caught also on the slow path
     @test_throws ErrorException try_decode(MemoryView(zeros(UInt8, 1)), Int64, Liar())
     @test_throws ErrorException try_encode!(MemoryView(zeros(UInt8, 1)), Int64(0), Liar())
-    @test_throws ErrorException try_load(CursorReader(UInt8[]), Int64, Liar())
+    @test_throws ErrorException try_load(CursorReader([0x00]), Int64, Liar())
+    # The codec is not called when there are no bytes
+    @test is_err(try_load(CursorReader(UInt8[]), Int64, Liar()), EndOfInput)
 end
 
 @testset "Memory-like arguments" begin
@@ -258,7 +259,7 @@ end
         @test M.store_all(w1, MemoryView(d1)) == store_all(w2, MemoryView(d2), E)
         @test w1.vec == w2.vec
     end
-    @test_throws MethodError Little.store(VecWriter(), 'a')
+    @test_throws ArgumentError Little.store(VecWriter(), 'a')
 end
 
 @testset "DecodeError" begin

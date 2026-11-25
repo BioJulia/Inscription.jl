@@ -4,12 +4,12 @@
     @test BigEndian() isa Endianness
     @test !(UTF8() isa Endianness)
     # No silently ignored arguments
-    @test_throws MethodError store(VecWriter(), 'a', LittleEndian())
-    @test_throws MethodError try_decode(MemoryView([0x61]), Char, BigEndian())
-    @test_throws MethodError store(VecWriter(), 0x01, UTF8())
-    @test_throws MethodError try_load(CursorReader([0x01]), UInt8, UTF8())
-    @test_throws MethodError store(VecWriter(), Ptr{UInt8}(0), LittleEndian())
-    @test_throws MethodError store(VecWriter(), ('a', 'b'), LittleEndian())
+    @test_throws ArgumentError store(VecWriter(), 'a', LittleEndian())
+    @test_throws ArgumentError try_decode(MemoryView([0x61]), Char, BigEndian())
+    @test_throws ArgumentError store(VecWriter(), 0x01, UTF8())
+    @test_throws ArgumentError try_load(CursorReader([0x01]), UInt8, UTF8())
+    @test_throws ArgumentError store(VecWriter(), Ptr{UInt8}(0), LittleEndian())
+    @test_throws ArgumentError store(VecWriter(), ('a', 'b'), LittleEndian())
 end
 
 @testset "Codec schemes" begin
@@ -31,8 +31,8 @@ end
     @test_throws ArgumentError try_decode(MemoryView(zeros(UInt8, 8)), Boxed, LittleEndian())
     @test_throws ArgumentError store(VecWriter(), Boxed(UInt8[]), LittleEndian())
     # Only the Endianness encodings use the trait
-    @test_throws MethodError max_encoded_size(UInt32, UTF8())
-    @test_throws MethodError max_encoded_size(Boxed, UTF8())
+    @test_throws ArgumentError max_encoded_size(UInt32, UTF8())
+    @test_throws ArgumentError max_encoded_size(Boxed, UTF8())
 end
 
 @testset "as_unsigned" begin
@@ -103,10 +103,10 @@ end
     @test v == [0x05, 0x06]
     @test_throws TypeError encode!(ImmutableMemoryView(v), 0x0102, BigEndian())
     # Missing methods are MethodErrors, not stack overflows
-    @test_throws MethodError try_decode(ImmutableMemoryView(v), String, BigEndian())
-    @test_throws MethodError try_decode(MemoryView(v), String, BigEndian())
-    @test_throws MethodError encode!(MemoryView(v), "abc", BigEndian())
-    @test_throws MethodError try_encode!(MemoryView(v), "abc", BigEndian())
+    @test_throws ArgumentError try_decode(ImmutableMemoryView(v), String, BigEndian())
+    @test_throws ArgumentError try_decode(MemoryView(v), String, BigEndian())
+    @test_throws ArgumentError encode!(MemoryView(v), "abc", BigEndian())
+    @test_throws ArgumentError try_encode!(MemoryView(v), "abc", BigEndian())
 end
 
 @testset "Bool" begin

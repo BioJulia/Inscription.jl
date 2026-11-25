@@ -3,8 +3,8 @@
 
 `Encoding` are zero-sized trait structs used to signal how one value
 of a given type `T` is encoded to bytes, and decoded from bytes.
-`T` needn't be a bitstype, but every encoding of a `T` must have a size of at most
-[`max_encoded_size(T, enc)`](@ref max_encoded_size) bytes.
+`T` needn't be a bitstype. Every encoding of a `T` must have a size of at most
+[`max_encoded_size(T, enc)`](@ref max_encoded_size) bytes, unless that is [`Unbounded`](@ref).
 Thus, reading and writing behaviour is governed by the pair `(T, enc::Encoding)`.
 Such an implementation over a pair is called a "codec".
 Given a single implementation of a codec, encoding, and decoding to and from `MemoryView`,
@@ -124,11 +124,32 @@ julia> decode(MemoryView(b"\\xe2\\x82"), Char, UTF8()) # truncated input: a malf
 struct UTF8 <: Encoding end
 
 """
-    DecodeInput{L}
+    Unbounded()
 
-The input of [`codec_try_decode`](@ref): the bytes to decode a value from. It holds at
-least `L` bytes. A codec reads it only through these functions, and returns their
-[`TooShort`](@ref) with [`@?`](@ref):
+Marker struct that signals an encoding has no, or a large, upper limit on
+number of encoded bytes, e.g. for null-terminated strings.
+
+This signals that when loading from an `AbstractBufReader`, BitScribbling should
+not attempt to buffer the maximal size up front.
+Implemented as `codec_max_encoded_size(::Type{T}, ::SomeEncoding) = Unbounded()`,
+with the encoding typically being `Endianness`.
+
+Also returned by [`max_encoded_size`](@ref).
+
+See also: [`codec_max_encoded_size`](@ref).
+"""
+struct Unbounded end
+
+# Returned by the default method of `codec_max_encoded_size`: there is no codec.
+struct NoCodec end
+
+"""
+    abstract type DecodeInput
+
+The input of [`codec_try_decode`](@ref): the bytes to decode a value from.
+This abstracts over `Memory`-backed input and `AbstractBufReader`-backed input.
+
+A codec reads from `DecodeInput` only through these functions:
 * [`require_bytes(input, n)`](@ref require_bytes): the first `n` bytes, as a memory view
   of length `n`;
 * [`peek_byte(input, i)`](@ref peek_byte): the byte at index `i`, or `nothing` if the
@@ -136,35 +157,47 @@ least `L` bytes. A codec reads it only through these functions, and returns thei
 * [`decode_field(input, T, enc)`](@ref decode_field): a value of type `T` from the start,
   the number of bytes it used, and the input after them.
 
-A codec is compiled for two kinds of input, and doesn't need to tell them apart:
-* Usually, `L` is [`max_encoded_size(T, enc)`](@ref max_encoded_size). Then the reads
-  within the first `L` bytes can't fail, and since `L` is a constant, their checks are
-  removed when the codec is compiled.
-* Near the end of the data, or of a reader's buffer, `L` is zero, and the reads check the
-  length.
+These functions may return [`TooShort`](@ref), which can conveniently be returned
+early with [`@?`](@ref), as in `@? peek_byte(input, 1)`.
+When `TooShort` is returned from `codec_try_decode` and `DecodeInput` is backed by
+a reader, this signals that more bytes should be fetched from the reader.
 
-The input may be partial: when loading from an `AbstractBufReader`, it may be the reader's
-buffer, and more bytes may arrive later. When a codec asks for bytes that haven't arrived
-yet, these functions return `TooShort`, which means that more bytes are needed. So a
-codec decodes partial input correctly without handling it: its result depends only on
-the bytes it looked at, and those are the same however the input continues.
+The input of a bounded codec ends after `max_encoded_size(T, enc)` bytes.
 
-The input ends after `max_encoded_size(T, enc)` bytes, also if more bytes follow, so a
-codec can't read beyond them.
+# Extended help
+## Invalidated views
+When backed by a reader, and `TooShort` requests more bytes, previous views of the
+`DecodeInput`'s data from `require_bytes` might be invalidated.
+To be correct for all inputs, a codec must follow these rules:
+
+* [`require_bytes`](@ref), [`peek_byte`](@ref) and [`decode_field`](@ref) which reaches
+  beyond the number of earlier reads. E.g. if an earlier read reached index 10, future
+  reads reaching indices > 10 will invalidate previous views, but not reads reaching
+  only indices < 11.
+* All views are invalidated when `codec_try_decode` returns. So, do not return views,
+  or otherwise let views escape from `codec_try_decode`.
 """
-struct DecodeInput{L}
+abstract type DecodeInput end
+
+# Memory known to hold at least `L` bytes.
+struct MemoryInput{L} <: DecodeInput
     mem::ImmutableMemoryView{UInt8}
     # Whether the input ends at the end of `mem`. If not, more bytes may follow `mem`.
     ends::Bool
-    # The number of bytes before `mem` in the input that the package gave to the codec.
-    # Inputs after fields, made by `decode_field`, start after the start of that input.
-    # `TooShort` counts from there.
-    offset::Int
     # Internal. The caller must ensure that `length(mem) ≥ L`.
-    function DecodeInput{L}(mem::ImmutableMemoryView{UInt8}, ends::Bool, offset::Int = 0) where {L}
+    function MemoryInput{L}(mem::ImmutableMemoryView{UInt8}, ends::Bool) where {L}
         L isa Int && L ≥ 0 || error("L must be a non-negative Int")
-        return new{L}(mem, ends, offset)
+        return new{L}(mem, ends)
     end
+end
+
+# The bytes after the first `offset` bytes of the buffer of `io`, which is filled as needed.
+# Nothing is consumed. The input ends after the first `stop` bytes of the buffer, counted
+# from the start of the buffer, or at EOF.
+struct ReaderInput{R <: AbstractBufReader} <: DecodeInput
+    io::R
+    offset::Int
+    stop::Int
 end
 
 """
@@ -188,7 +221,9 @@ a codec can't write beyond them.
 """
 struct EncodeOutput{L}
     mem::MutableMemoryView{UInt8}
-    # As for `DecodeInput`
+    # The number of bytes before `mem` in the output that the package gave to the codec.
+    # Outputs after fields, made by `encode_field`, start after the start of that output.
+    # `TooShort` counts from there.
     offset::Int
     # Internal. The caller must ensure that `length(mem) ≥ L`.
     function EncodeOutput{L}(mem::MutableMemoryView{UInt8}, offset::Int = 0) where {L}

@@ -205,20 +205,20 @@ Returned by the functions that a codec reads or writes bytes through, when the i
 output is too short, and returned by the codec with [`@?`](@ref). See
 [`DecodeInput`](@ref) and [`EncodeOutput`](@ref). A codec does not construct it itself.
 
-The public property `.needed::Int` is the number of bytes that were asked for, counted
-from the start of the input or output that the package gave to the codec. It is larger
-than that input or output.
-
-When decoding partial input, as when loading from a reader, `TooShort` means that more
-bytes are needed to decide the result, and a reader buffers `needed` bytes before it
-calls the codec again. A codec never returns it when its input or output has
-[`max_encoded_size`](@ref) bytes.
+When decoding partial input, `TooShort` means that more bytes are needed to decide the
+result. A codec never returns it when its input or output has [`max_encoded_size`](@ref)
+bytes.
 
 See also: [`Invalid`](@ref)
 """
 struct TooShort
+    # When encoding, the number of bytes that were asked for, counted from the start of the
+    # output that the package gave to the codec. It is larger than that output. A writer
+    # grows its buffer to at least this size. Not used when decoding, then it is zero.
     needed::Int
 end
+
+TooShort() = TooShort(0)
 
 """
     Invalid()

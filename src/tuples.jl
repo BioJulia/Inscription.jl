@@ -36,7 +36,7 @@ is_valid_bits(::Type{<:Tuple}, ::NTuple{N, UInt8}) where {N} = true
 for E in (LittleEndian, BigEndian)
     @eval begin
         @inline function codec_max_encoded_size(::Type{T}, enc::$E) where {T <: Tuple}
-            return Val(tuple_max_encoded_size(T, enc))
+            return as_val(tuple_max_encoded_size(T, enc))
         end
         @inline function codec_try_decode(input::DecodeInput, ::Type{T}, enc::$E) where {T <: Tuple}
             return tuple_try_decode(input, T, enc)
@@ -63,8 +63,14 @@ function tuple_body(T::Type, body::Function)::Expr
 end
 
 @generated function tuple_max_encoded_size(::Type{T}, enc::Endianness) where {T}
-    return tuple_body(T, Fs -> (:(+($((:(max_encoded_size($F, enc)) for F in Fs)...))),))
+    return tuple_body(T, Fs -> (:(add_sizes($((:(max_encoded_size($F, enc)) for F in Fs)...))),))
 end
+
+# A tuple with an unbounded element is unbounded
+@inline add_sizes(ns::Int...) = +(ns...)
+@inline add_sizes(::Union{Int, Unbounded}...) = Unbounded()
+@inline as_val(n::Int) = Val(n)
+@inline as_val(n::Unbounded) = n
 
 # The elements are decoded with `decode_field`, which passes on the input after each
 # element. On the fast path, the input of each element is known to hold its

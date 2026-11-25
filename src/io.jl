@@ -31,7 +31,7 @@ DecodeError(BitScribbling.DecodeErrorKinds.EndOfInput)
 This function calls `grow_buffer` until `io` is EOF, or enough bytes has been buffered
 in IO to decode the value, or to decide the value is invalid.
 By default, that is when [`max_encoded_size(T, enc)`](@ref max_encoded_size) bytes
-are buffered.
+are buffered. [`Unbounded`](@ref) types are buffered as their codec reads them.
 For variable-length encodings, like `Char`'s `UTF8` encoding, this can cause blocking.
 Suppose `io` contains the single byte `'a'` (byte `0x61`) and blocks until that is read.
 A char encodes in up to 4 bytes, so `io` would wait indefinitely for more bytes to arrive.
@@ -67,9 +67,7 @@ end
         io::AbstractBufReader, ::Type{T}, enc::Encoding
     )::Union{Tuple{T, Int}, DecodeError} where {T}
     buffer = get_buffer(io)::ImmutableMemoryView{UInt8}
-    if length(buffer) < max_encoded_size(T, enc)
-        (buffer, _) = @noinline buffer_decided(io, T, enc)
-    end
+    holds_any(length(buffer), T, enc) || return @inline load_slow(io, T, enc)
     result = try_decode_sized(buffer, 1, T, enc)
     result isa DecodeError && return result
     (_, n) = result
@@ -77,34 +75,48 @@ end
     return result
 end
 
-# Buffer bytes until the first T in the buffer of `io` is decided, or `io` is at EOF.
-# Return the buffer, and whether it is the complete input, i.e. `io` is at EOF.
-# Either way, decoding from the buffer as complete input gives the right answer: the
-# result is decided by the buffered bytes, or the buffer is all the input.
-# `max_encoded_size` bytes always decide the result, so the loop ends, also if the codec
-# breaks its contract.
-function buffer_decided(
+# `try_load_sized`, or, without a codec, `try_load`, which the user may have overloaded.
+# Only called when loading is expected to fail.
+function load_failing(
         io::AbstractBufReader, ::Type{T}, enc::Encoding
-    )::Tuple{ImmutableMemoryView{UInt8}, Bool} where {T}
-    max_size = max_encoded_size(T, enc)
-    buffer = get_buffer(io)::ImmutableMemoryView{UInt8}
-    while length(buffer) < max_size
-        result = decode_start(buffer, T, enc, false)
-        result isa TooShort || break
-        # Buffer the bytes that the codec asked for. A codec that breaks its contract may
-        # ask for fewer than the buffer has, or more than `max_size`, so clamp it. Then
-        # the buffer grows by at least one byte, and the loop ends.
-        needed = clamp(result.needed, length(buffer) + 1, max_size)
-        # Throws `BufferTooShort` if the capacity of `io` is smaller than `needed`
-        new_buffer = get_nonempty_buffer(io, needed)
-        # nothing means EOF before `needed` bytes could be buffered
-        new_buffer === nothing && return (get_buffer(io)::ImmutableMemoryView{UInt8}, true)
-        # Check, so that a reader that breaks the contract of `get_nonempty_buffer` can't
-        # make this loop forever
-        length(new_buffer) < needed && throw_short_buffer_error(io, needed, length(new_buffer))
-        buffer = new_buffer
+    )::Union{Tuple{T, Int}, DecodeError} where {T}
+    has_codec(T, enc) && return try_load_sized(io, T, enc)
+    result = try_load(io, T, enc)
+    result isa DecodeError && return result
+    return throw_load_into_error(T, enc)
+end
+
+@noinline function throw_load_into_error(::Type{T}, enc::Encoding) where {T}
+    return error(
+        "The method of `load_into!` for `$T` with `$enc` broke its contract: it loaded no " *
+            "elements, but `try_load` loaded the next element"
+    )
+end
+
+# The slow path of `try_load_sized`
+function load_slow(
+        io::AbstractBufReader, ::Type{T}, enc::Encoding
+    )::Union{Tuple{T, Int}, DecodeError} where {T}
+    (x, n) = @? peek_value(io, T, enc)
+    @inbounds consume(io, n)
+    return (x, n)
+end
+
+# Decode a T from the start of `io`, without consuming it. Its bytes are buffered as the
+# codec reads them, so the codec runs once, and no more bytes are waited for than it reads.
+# The bytes of the T are in the buffer afterwards.
+function peek_value(
+        io::AbstractBufReader, ::Type{T}, enc::Encoding
+    )::Union{Tuple{T, Int}, DecodeError} where {T}
+    # Measurably faster than calling `get_nonempty_buffer` also when bytes are buffered
+    if isempty(get_buffer(io)::ImmutableMemoryView{UInt8})
+        get_nonempty_buffer(io) === nothing && return DecodeError(EndOfInput)
     end
-    return (buffer, false)
+    input = ReaderInput(io, 0, typemax(Int))
+    result = decode_reader(input, T, enc, max_encoded_size(T, enc))
+    result isa TooShort && return DecodeError(Truncated)
+    result isa Invalid && return DecodeError(InvalidData)
+    return result
 end
 
 # Buffer at least n bytes, or everything up to EOF.
@@ -224,7 +236,8 @@ If `x` can't be encoded with `enc`, return an [`EncodeError`](@ref) of kind
 `InvalidValue`, and consume nothing.
 
 Throw an `IOError` of kind `BufferTooShort` if `io` can't provide a buffer of
-[`max_encoded_size(typeof(x), enc)`](@ref max_encoded_size) bytes, either because it is
+[`max_encoded_size(typeof(x), enc)`](@ref max_encoded_size) bytes, or, for
+[`Unbounded`](@ref) types, of the size of the encoding, either because it is
 full, or because its buffer can't grow large enough. Writers that can always grow, such
 as those returned by `BufferIO.expandable`, never throw this. Like the buffer capacity
 of a reader for [`try_load`](@ref), this is a property of how `io` was constructed, not
@@ -251,9 +264,12 @@ julia> io.vec
 ```
 """
 @inline function try_store(io::AbstractBufWriter, x::T, enc::Encoding)::Union{Int, EncodeError} where {T}
+    max_encoded_size(T, enc) isa Unbounded && return store_unbounded(io, x, enc)
     buffer = get_buffer(io)::MutableMemoryView{UInt8}
-    if length(buffer) < max_encoded_size(T, enc)
-        buffer = @noinline write_buffer(io, max_encoded_size(T, enc))
+    max_size = max_encoded_size(T, enc)
+    if length(buffer) < max_size
+        # `@noinline` also applies to calls in the arguments, so there must be none
+        buffer = @noinline write_buffer(io, max_size)
     end
     # The buffer holds at least `max_encoded_size` bytes, so the only error is that `x`
     # can't be encoded, also by the contract of `codec_try_encode!`.
@@ -293,12 +309,36 @@ julia> io.vec
     # This is faster, and the code smaller, than implementing `store` with `try_store`.
     # Doing the same for `try_store`, or the load functions, made them slower.
     buffer = get_buffer(io)::MutableMemoryView{UInt8}
+    # Without a codec, `try_store` is the method that the user added
+    has_codec(T, enc) || return @noinline store_slow(io, x, enc)
+    max_encoded_size(T, enc) isa Unbounded && return @noinline store_slow(io, x, enc)
     length(buffer) < max_encoded_size(T, enc) && return @noinline store_slow(io, x, enc)
     # Calls `_try_encode!` directly, so that `@inbounds` reaches its checks, see `try_store`
     n = @inbounds _try_encode!(buffer, 1, x, enc)
     n isa EncodeError && throw_encode_error(n)
     @inbounds consume(io, n)
     return n
+end
+
+# `try_store` of unbounded types. Encode into the buffer, and grow it until there is room.
+@noinline function store_unbounded(io::AbstractBufWriter, x, enc::Encoding)::Union{Int, EncodeError}
+    buffer = get_buffer(io)::MutableMemoryView{UInt8}
+    while true
+        result = encode_short(buffer, x, enc)
+        result isa Invalid && return EncodeError(InvalidValue)
+        if result isa Int
+            @inbounds consume(io, result)
+            return result
+        end
+        # A codec that breaks its contract may ask for no more bytes than the buffer has
+        needed = max(result.needed, length(buffer) + 1)
+        # Growing doesn't wait for anything, so at least double the buffer, such that the
+        # encodings of all attempts take linear time. A writer with a limited buffer may
+        # have room for `needed` bytes, but not for twice the buffer.
+        is_expandable(typeof(io)) && (needed = max(needed, 2 * length(buffer)))
+        buffer = write_buffer(io, needed)
+    end
+    return
 end
 
 function store_slow(io::AbstractBufWriter, x, enc::Encoding)::Int

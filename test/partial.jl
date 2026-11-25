@@ -64,50 +64,48 @@
     # The functions that codecs read their input through. `L` is the number of bytes
     # the input is known to hold when the codec is compiled.
     bytes3 = ImmutableMemoryView([0x01, 0x02, 0x03])
-    full = DecodeInput{3}(bytes3, true)
-    complete = DecodeInput{0}(bytes3, true)
-    part = DecodeInput{0}(bytes3, false)
-    empty_complete = DecodeInput{0}(ImmutableMemoryView(UInt8[]), true)
-    empty_partial = DecodeInput{0}(ImmutableMemoryView(UInt8[]), false)
+    full = BitScribbling.MemoryInput{3}(bytes3, true)
+    complete = BitScribbling.MemoryInput{0}(bytes3, true)
+    part = BitScribbling.MemoryInput{0}(bytes3, false)
+    empty_complete = BitScribbling.MemoryInput{0}(ImmutableMemoryView(UInt8[]), true)
+    empty_partial = BitScribbling.MemoryInput{0}(ImmutableMemoryView(UInt8[]), false)
     for input in (full, complete, part)
         @test require_bytes(input, 2) == [0x01, 0x02]
         @test require_bytes(input, 3) == [0x01, 0x02, 0x03]
         @test isempty(require_bytes(input, 0))
-        @test require_bytes(input, 4) === TooShort(4)
-        @test require_bytes(input, typemax(Int)) === TooShort(typemax(Int))
+        @test require_bytes(input, 4) === TooShort()
+        @test require_bytes(input, typemax(Int)) === TooShort()
         @test_throws ArgumentError require_bytes(input, -1)
         @test peek_byte(input, 3) === 0x03
         @test_throws LightBoundsError peek_byte(input, 0)
     end
-    @test require_bytes(empty_complete, 1) === TooShort(1)
-    @test require_bytes(empty_partial, 1) === TooShort(1)
+    @test require_bytes(empty_complete, 1) === TooShort()
+    @test require_bytes(empty_partial, 1) === TooShort()
     @test peek_byte(complete, 4) === nothing
     @test peek_byte(full, 4) === nothing
-    @test peek_byte(part, 4) === TooShort(4)
-    @test peek_byte(empty_partial, 1) === TooShort(1)
+    @test peek_byte(part, 4) === TooShort()
+    @test peek_byte(empty_partial, 1) === TooShort()
     @test peek_byte(empty_complete, 1) === nothing
 
     (x, n, rest) = decode_field(full, UInt16, BigEndian())
     @test (x, n) === (0x0102, 2)
-    @test rest isa DecodeInput{1}
+    @test rest isa BitScribbling.MemoryInput{1}
     @test require_bytes(rest, 1) == [0x03]
     (x, n, rest) = decode_field(complete, UInt16, BigEndian())
     @test (x, n) === (0x0102, 2)
-    @test rest isa DecodeInput{0}
-    # `TooShort` counts from the start of the input given to the codec, here `complete`
-    @test decode_field(rest, UInt16, BigEndian()) === TooShort(4)
+    @test rest isa BitScribbling.MemoryInput{0}
+    @test decode_field(rest, UInt16, BigEndian()) === TooShort()
     (x, n, rest) = decode_field(rest, Char, UTF8())
     @test (x, n) === ('\x03', 1)
-    @test rest.offset == 3
-    @test decode_field(rest, UInt8, BigEndian()) === TooShort(4)
-    @test decode_field(rest, Char, UTF8()) === TooShort(4)
-    @test require_bytes(rest, 2) === TooShort(5)
-    @test decode_field(empty_partial, UInt8, BigEndian()) === TooShort(1)
-    @test decode_field(DecodeInput{0}(ImmutableMemoryView([0x02]), true), Even, BigEndian()) isa Tuple
-    @test decode_field(DecodeInput{0}(ImmutableMemoryView([0x01]), true), Even, BigEndian()) === Invalid()
+    @test decode_field(rest, UInt8, BigEndian()) === TooShort()
+    @test decode_field(rest, Char, UTF8()) === TooShort()
+    @test require_bytes(rest, 2) === TooShort()
+    @test decode_field(empty_partial, UInt8, BigEndian()) === TooShort()
+    @test decode_field(BitScribbling.MemoryInput{0}(ImmutableMemoryView([0x02]), true), Even, BigEndian()) isa Tuple
+    @test decode_field(BitScribbling.MemoryInput{0}(ImmutableMemoryView([0x01]), true), Even, BigEndian()) === Invalid()
     # Partial input passes on to the rest
     (_, _, rest) = decode_field(part, UInt16, BigEndian())
-    @test peek_byte(rest, 2) === TooShort(4)
+    @test peek_byte(rest, 2) === TooShort()
 
     # The same for outputs
     out_bytes = zeros(UInt8, 3)

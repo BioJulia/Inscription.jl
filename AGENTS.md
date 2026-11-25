@@ -1,7 +1,7 @@
 # AGENTS.md
 This file provide guidance for coding agents working on the BitScribbling.jl repository.
 
-BitScribbling is a Julia package that provides abstractions for reading and writing values whose encodings have a bounded size, such as integers, floats, `Char` and structs (`isbits` or not), to and from memory, and to and from the reader and writer types of the BufferIO package.
+BitScribbling is a Julia package that provides abstractions for reading and writing values, such as integers, floats, `Char` and structs (`isbits` or not), to and from memory, and to and from the reader and writer types of the BufferIO package.
 
 The major design criteria of the package are:
 1. Low overhead. Using the abstractions should ideally be as fast as manual code loading and storing via pointers.
@@ -9,7 +9,7 @@ The major design criteria of the package are:
 
 Explicit non-goals of this package are:
 1. A simple API. This package chooses complex pit-of-success APIs over a simple load/store abstraction that papers over the complexities mentioned above.
-2. Encodings without a size bound, like those of `Dict`, `Vector` and `BigInt`, and general serialization of object graphs.
+2. General serialization of object graphs, and built-in encodings of types like `Dict`, `Vector` and `BigInt`. Users may implement codecs for encodings without a size bound (`Unbounded`), but the values are buffered whole when loaded.
 3. Support for specific formats unless particularly widespread. I.e., no explicit TOML or BSON support, but Char's UTF8 format is included.
 
 ## Code Conventions

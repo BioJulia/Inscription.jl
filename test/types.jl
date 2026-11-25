@@ -200,7 +200,7 @@ end
         @test decode(buf, typeof(x), e) === x
     end
     # Not opted in: no codec
-    @test_throws MethodError max_encoded_size(Plain, LittleEndian())
+    @test_throws ArgumentError max_encoded_size(Plain, LittleEndian())
 end
 
 @testset "Tuples" begin
@@ -312,9 +312,9 @@ end
     @test_throws ArgumentError encode!(UInt8[], (), e)
     @test_throws ArgumentError max_encoded_size(Tuple{Integer}, e)
     @test_throws ArgumentError try_decode(zeros(UInt8, 8), Tuple{Integer}, e)
-    @test_throws MethodError max_encoded_size(Tuple{Char}, e)
+    @test_throws ArgumentError max_encoded_size(Tuple{Char}, e)
     # Only the byte orders encode tuples
-    @test_throws MethodError max_encoded_size(Tuple{Char, Char}, UTF8())
+    @test_throws ArgumentError max_encoded_size(Tuple{Char, Char}, UTF8())
 
     # Encoding element by element doesn't allocate
     function sum_tuples(io)

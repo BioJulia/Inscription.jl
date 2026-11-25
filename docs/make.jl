@@ -20,6 +20,7 @@ makedocs(
         "BitScribbling" => "index.md",
         "Concepts" => "concepts.md",
         "Usage" => "usage.md",
+        "Examples" => "examples.md",
         "Implementing a type" => "custom.md",
         "Reference" => "reference.md",
     ],

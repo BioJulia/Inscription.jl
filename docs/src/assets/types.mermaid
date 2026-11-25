@@ -6,26 +6,31 @@
 %% htmlLabels=false makes plain SVG text labels, which render inside an <img> tag.
 %% To use a system Chromium instead of letting Puppeteer download one, add `-p pptr.json`,
 %% where pptr.json contains: {"executablePath":"/usr/bin/chromium","args":["--no-sandbox"]}
+
 flowchart TD
-Y[Encodings of bounded size?] --> |No| X[Not supported by BitScribbling.jl]
-Y --> |Yes| Z[Bitstype?]
-Z --> |No| C
-Z --> |Yes| A
-A[Struct or primitive type?] --> |Struct| B[Contains padding on any platform? see Structs]
-B --> |Yes| C[Can it be converted to and from another type, e.g. a tuple?]
-B --> |No| D[All fields recursively BitsLoadable?]
-D --> |Yes| E[Implement BitsLoadable]
-D --> |No| F[All fields recursively BitsStorable?]
-F --> |Yes| G[Implement BitsStorable]
-F --> |No| C
+VarSize[Can be any size, like String?]
+PD[Contains padding on any platform? See below]
+SPR[Struct or primitive type?]
+ABP[All bitpatterns valid?]
+DBL[Declare BitsLoadable]
+IBS[Implement BitsStorable]
+CONV[Can be easily converted to/from a type with existing codec?]
+MNL[Implement Manual]
+PXY[Declare Proxy]
+RBL[All fields recursively BitsLoadable?]
+RBS[All fields recursively BitsStorable?]
 
-A --> |Primitive| H[Bit size multiple of 8?]
-H --> |No| I[Implement Manual, see Odd Sized Primitives]
-H --> |Yes| J[Storage same bits as in-memory representation?]
-J --> |No| C
-J --> |Yes| K[All bitpatterns valid?]
-K --> |Yes| E
-K --> |No| G
-
-C --> |Yes| P[Declare Proxy]
-C --> |No| M[Implement Manual]
+VarSize --> |Yes| CONV
+VarSize --> |No| PD
+PD --> |Yes| CONV
+PD --> |No| SPR
+CONV --> |Yes| PXY
+CONV --> |No| MNL
+SPR --> |Struct| RBL
+RBL --> |Yes| DBL
+RBL --> |No| RBS
+RBS --> |Yes| IBS
+RBS --> |No| CONV
+SPR --> |Primitive| ABP
+ABP --> |Yes| DBL
+ABP --> |No| IBS

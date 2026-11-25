@@ -9,6 +9,17 @@
 # As for Base's `write`, a `!` marks that memory is written, not that an IO is advanced.
 # So the loads end with `!`, and the stores don't.
 
+# The bulk functions call each other and the scalar functions, which users may overload.
+# So the counts they return are checked, before they are trusted with `@inbounds`.
+@inline function check_count(f::F, n::Int, max::Int)::Int where {F}
+    (n % UInt) ≤ (max % UInt) || throw_bulk_count_error(nameof(f), n, max)
+    return n
+end
+
+@noinline function throw_bulk_count_error(name::Symbol, n::Int, max::Int)
+    return error("A method of `$name` broke its contract: it returned a count of $n, which is not in 0:$max")
+end
+
 """
     decode_all!(dst, src, enc::Encoding)::Tuple{Int, Int}
 
@@ -88,17 +99,20 @@ function decode_every!(
     n_bytes = 0
     while true
         rest_dst = @inbounds dst[(n_elements + 1):end]
-        (k, n) = decode_elements!(rest_dst, unsafe_suffix(src, n_bytes + 1), enc, true)
-        n_elements += k
-        n_bytes += n
+        rest_src = unsafe_suffix(src, n_bytes + 1)
+        (k, n) = decode_all!(rest_dst, rest_src, enc)::Tuple{Int, Int}
+        n_elements += check_count(decode_all!, k, length(rest_dst))
+        n_bytes += check_count(decode_all!, n, length(rest_src))
         n_elements == length(dst) && return n_bytes
-        # `decode_elements!` stops before `dst` is full only if the next element fails
+        # `decode_all!` stops before `dst` is full only if the next element fails
         # to decode, so this throws its error. If it decodes the element anyway, e.g.
         # because the codec is not pure, use the element.
-        (x, next) = decode_next(src, n_bytes + 1, T, enc)
+        result = try_decode_next(src, n_bytes + 1, T, enc)
+        result isa DecodeError && throw_decode_error(result)
+        (x, next) = result
         n_elements += 1
         @inbounds dst[n_elements] = x
-        n_bytes = next - 1
+        n_bytes += check_count(try_decode_next, next - 1 - n_bytes, length(src) - n_bytes)
     end
     return
 end
@@ -259,15 +273,19 @@ function encode_every!(
     n_elements = 0
     n_bytes = 0
     while true
-        (k, n) = encode_all!(unsafe_suffix(dst, n_bytes + 1), unsafe_suffix(src, n_elements + 1), enc)
-        n_elements += k
-        n_bytes += n
+        rest_dst = unsafe_suffix(dst, n_bytes + 1)
+        rest_src = unsafe_suffix(src, n_elements + 1)
+        (k, n) = encode_all!(rest_dst, rest_src, enc)::Tuple{Int, Int}
+        n_elements += check_count(encode_all!, k, length(rest_src))
+        n_bytes += check_count(encode_all!, n, length(rest_dst))
         n_elements == length(src) && return n_bytes
         # `encode_all!` stops before `src` is exhausted only if the next element can't be
         # encoded, so this throws its error. If it encodes the element anyway, e.g.
         # because the codec is not pure, continue after it.
         n_elements += 1
-        n_bytes += encode!(dst, n_bytes + 1, (@inbounds src[n_elements]), enc)
+        result = try_encode!(dst, n_bytes + 1, (@inbounds src[n_elements]), enc)
+        result isa EncodeError && throw_encode_failure(dst, n_bytes + 1, T, enc, result)
+        n_bytes += check_count(try_encode!, result, length(dst) - n_bytes)
     end
     return
 end
@@ -330,13 +348,26 @@ function load_into!(
     )::Tuple{Int, Int} where {T}
     isempty(dst) && return (0, 0)
     buffer = get_buffer(io)::ImmutableMemoryView{UInt8}
-    complete = false
-    if length(buffer) < max_encoded_size(T, enc)
-        (buffer, complete) = @noinline buffer_decided(io, T, enc)
-    end
-    (n_elements, n_bytes) = decode_elements!(dst, buffer, enc, complete)
+    holds_any(length(buffer), T, enc) || return @noinline load_into_slow!(io, dst, enc)
+    (n_elements, n_bytes) = decode_elements!(dst, buffer, enc, false)
     @inbounds consume(io, n_bytes)
     return (n_elements, n_bytes)
+end
+
+# The slow path of `load_into!`, where `dst` is not empty. Load the first element, filling
+# the buffer as needed, then the elements that are already buffered. At most one element,
+# the last, is decoded in vain, so loading elements until EOF takes linear time.
+function load_into_slow!(
+        io::AbstractBufReader, dst::MutableMemoryView{T}, enc::Encoding
+    )::Tuple{Int, Int} where {T}
+    result = peek_value(io, T, enc)
+    result isa DecodeError && return (0, 0)
+    (x, n) = result
+    @inbounds dst[1] = x
+    rest = unsafe_suffix(get_buffer(io)::ImmutableMemoryView{UInt8}, n + 1)
+    (k, m) = decode_elements!((@inbounds dst[2:end]), rest, enc, false)
+    @inbounds consume(io, n + m)
+    return (k + 1, n + m)
 end
 
 """
@@ -370,8 +401,8 @@ function load_all!(io::AbstractBufReader, dst::MutableMemoryView, enc::Encoding)
     n_elements = 0
     n_bytes = 0
     while !isempty(dst)
-        (k, n) = load_into!(io, dst, enc)
-        iszero(k) && break
+        (k, n) = load_into!(io, dst, enc)::Tuple{Int, Int}
+        iszero(check_count(load_into!, k, length(dst))) && break
         n_elements += k
         n_bytes += n
         dst = @inbounds dst[(k + 1):end]
@@ -416,12 +447,13 @@ ERROR: DecodeError: Truncated input: the input ended partway through an encoded 
 function load_every!(io::AbstractBufReader, dst::MutableMemoryView{T}, enc::Encoding)::Int where {T}
     n_total = 0
     while !isempty(dst)
-        (n_elements, n_bytes) = load_into!(io, dst, enc)
+        (n_elements, n_bytes) = load_into!(io, dst, enc)::Tuple{Int, Int}
+        check_count(load_into!, n_elements, length(dst))
         if iszero(n_elements)
             # `load_into!` loads nothing only if the next element fails to load, so
             # this gets the error. If it loads an element anyway, e.g. because the codec
             # is not pure, use the element.
-            result = try_load_sized(io, T, enc)
+            result = load_failing(io, T, enc)
             result isa DecodeError && throw_decode_error(result)
             (x, n_bytes) = result
             @inbounds dst[1] = x
@@ -469,14 +501,29 @@ function store_into(
         io::AbstractBufWriter, src::MemoryView{T}, enc::Encoding
     )::Tuple{Int, Int} where {T}
     isempty(src) && return (0, 0)
+    max_encoded_size(T, enc) isa Unbounded && return store_into_unbounded(io, src, enc)
     buffer = get_buffer(io)::MutableMemoryView{UInt8}
-    if length(buffer) < max_encoded_size(T, enc)
-        buffer = @noinline write_buffer(io, max_encoded_size(T, enc))
+    max_size = max_encoded_size(T, enc)
+    if length(buffer) < max_size
+        # `@noinline` also applies to calls in the arguments, so there must be none
+        buffer = @noinline write_buffer(io, max_size)
     end
     # The buffer has room for any element, so encoding stops before the first
     # element only if it can't be encoded, by the contract of `codec_try_encode!`.
-    (n_elements, n_bytes) = encode_all!(buffer, src, enc)
-    @inbounds consume(io, n_bytes)
+    (n_elements, n_bytes) = encode_all!(buffer, src, enc)::Tuple{Int, Int}
+    @inbounds consume(io, check_count(encode_all!, n_bytes, length(buffer)))
+    return (n_elements, n_bytes)
+end
+
+# Store the elements there is room for, or else the first one, growing the buffer.
+function store_into_unbounded(io::AbstractBufWriter, src::MemoryView, enc::Encoding)::Tuple{Int, Int}
+    buffer = get_buffer(io)::MutableMemoryView{UInt8}
+    (n_elements, n_bytes) = encode_all!(buffer, src, enc)::Tuple{Int, Int}
+    if iszero(n_elements)
+        n = store_unbounded(io, (@inbounds src[1]), enc)
+        return n isa EncodeError ? (0, 0) : (1, n)
+    end
+    @inbounds consume(io, check_count(encode_all!, n_bytes, length(buffer)))
     return (n_elements, n_bytes)
 end
 
@@ -514,8 +561,8 @@ function store_all(io::AbstractBufWriter, src::MemoryView, enc::Encoding)::Tuple
     n_elements = 0
     n_bytes = 0
     while !isempty(src)
-        (k, n) = store_into(io, src, enc)
-        iszero(k) && break
+        (k, n) = store_into(io, src, enc)::Tuple{Int, Int}
+        iszero(check_count(store_into, k, length(src))) && break
         n_elements += k
         n_bytes += n
         src = @inbounds src[(k + 1):end]
@@ -551,12 +598,15 @@ julia> String(io.vec)
 function store_every(io::AbstractBufWriter, src::MemoryView{T}, enc::Encoding)::Int where {T}
     n_total = 0
     while !isempty(src)
-        (n_elements, n_bytes) = store_into(io, src, enc)
+        (n_elements, n_bytes) = store_into(io, src, enc)::Tuple{Int, Int}
+        check_count(store_into, n_elements, length(src))
         if iszero(n_elements)
             # `store_into` stores nothing only if the first element can't be
-            # encoded, so `store` throws the error. If it stores the element anyway,
+            # encoded, so `try_store` returns the error. If it stores the element anyway,
             # e.g. because the codec is not pure, use the element.
-            n_bytes = store(io, (@inbounds src[1]), enc)
+            result = try_store(io, (@inbounds src[1]), enc)
+            result isa EncodeError && throw_encode_error(result)
+            n_bytes = result
             n_elements = 1
         end
         n_total += n_bytes

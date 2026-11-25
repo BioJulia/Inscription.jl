@@ -5,7 +5,7 @@
 [![Documentation](https://img.shields.io/badge/docs-dev-blue.svg)](https://biojulia.github.io/BitScribbling.jl/dev)
 [![](https://codecov.io/gh/BioJulia/BitScribbling.jl/branch/master/graph/badge.svg)](https://codecov.io/gh/BioJulia/BitScribbling.jl)
 
-BitScribbling.jl provides abstractions for reading and writing values to byte arrays (via [MemoryViews.jl](https://github.com/BioJulia/MemoryViews.jl).jl) or I/O (via [BufferIO.jl](https://github.com/BioJulia/BufferIO.jl).jl).
+BitScribbling.jl provides abstractions for reading and writing values to byte arrays (via [MemoryViews.jl](https://github.com/BioJulia/MemoryViews.jl).jl) or to I/O (via [BufferIO.jl](https://github.com/BioJulia/BufferIO.jl).jl).
 
 It can be considered a more powerful version of Base's `read(::IO, T)`, `write(::IO, ::T)` as well as `unsafe_load`/`unsafe_store!`.
 Alternatively, it can be viewed as an extension of BufferIO.jl, which only supports IO on bytes, to support IO for all types.
@@ -15,13 +15,17 @@ You might want to use this package if you find yourself:
 * Care about how much `write(::IO, ::Float32)` allocates,
 * Find yourself writing non-`UInt8` data into `Vector{UInt8}`s for IO performance reasons.
 
+You probably don't need this package if:
+* Mostly do I/O by writing strings or raw arrays e.g. to log files,
+* Read/write specific formats like JSON, in which case you should use a package specific to that format.
+
 The major design goals of this package are:
 1. High performance. The abstractions of this package should be roughly on par with manual implementations using pointer operations and `reinterpret`. Users should rarely be discouraged from using BitScribbling abstractions due to performance.
 2. Present a hard-to-misuse API. BitScribbling APIs avoid making important behaviour implicit, such as platform endianness, platform-dependent struct padding, or performance traps due to slow fallback definitions. It attempts to guide users away from bugs.
 
 Explicit **non**-goals of this package are:
 1. A simple API. This package prefers semantically consistent, precise, efficient, and hard-to-misuse APIs over easy APIs.
-2. Reading/writing any type automatically via introspection, like Serialization.jl does
+2. Reading/writing any type automatically via introspection, like Serialization.jl does.
 3. Reading/writing nested types like nested dicts, common in e.g. JSON, TOML and BSON formats.
 4. Support for any specific format like JSON or CSV. Instead, this package is for generic I/O of individual values, and can be used to implement formats.
 
