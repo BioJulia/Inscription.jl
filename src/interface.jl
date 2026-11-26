@@ -643,12 +643,12 @@ decoded from. Return [`Invalid()`](@ref Invalid) if the bytes are not a valid en
 
 Read `input` only through [`require_bytes`](@ref), [`peek_byte`](@ref) and
 [`decode_field`](@ref), and return their [`TooShort`](@ref) with [`@?`](@ref). The codec
-never handles a short input itself: the functions buffer more bytes if the input is backed
-by a reader, and the caller decides what `TooShort` means, e.g. that the input is truncated,
-or that an element can't be decoded from the bytes buffered so far.
+never handles a short input itself, see [`DecodeInput`](@ref).
 
 An implementation must follow this contract:
-* **Pure.** The result depends only on the bytes it read from `input`.
+* **Pure.** The result depends only on the bytes it read from `input`. The codec may be
+  run more than once for the same bytes, e.g. again after returning `TooShort`, once
+  more bytes are available.
 * **Counted.** On success, the returned byte count is positive, and at most the number of
   bytes read. Bytes after the encoding that decide the result, e.g. a terminator, are
   read but not counted.
@@ -683,9 +683,10 @@ An encoding whose end is decided by the byte after it looks at that byte with
 end
 ```
 
-When loading from a reader whose buffer holds the bytes `"12"`, `peek_byte(input, 3)`
-makes the reader buffer a third byte, which may be another digit. When the reader is at
-EOF after `"12"`, it returns `nothing`, and the result is `12`.
+When only the bytes `"12"` are available, but the input may continue after them,
+`peek_byte(input, 3)` gets the third byte, which may be another digit, or returns
+`TooShort` if it is not available. When the input ends after `"12"`, it returns
+`nothing`, and the result is `12`.
 """
 function codec_try_decode end
 
@@ -759,8 +760,9 @@ const MIN_FILL_STEP = 1 << 16
 Get the byte at index `i` of `input`, or `nothing` if the input ends before it. `i` must
 be positive. Use with [`@?`](@ref) in [`codec_try_decode`](@ref).
 
-If the input is partial, see [`DecodeInput`](@ref), and doesn't hold byte `i` yet, return
-[`TooShort`](@ref). So `nothing` always means that the input ends before byte `i`.
+If byte `i` is not available yet, return [`TooShort`](@ref), see [`DecodeInput`](@ref).
+So `nothing` always means that the input ends before byte `i`, and not that its bytes are
+not available yet.
 
 May invalidate views of the input, see [`DecodeInput`](@ref).
 """
@@ -877,8 +879,7 @@ An implementation must follow this contract:
   the first `n`. They may belong to the caller, e.g. when patching a field into an
   existing buffer, or be written concurrently by another task.
 * When it returns `TooShort` or `Invalid`, it may have written to any byte of `output`.
-  Since `output` never holds more than `max_encoded_size(T, enc)` bytes, see
-  [`EncodeOutput`](@ref), these are at most the first `max_encoded_size(T, enc)` bytes
+  Since `output` never holds more than `max_encoded_size(T, enc)` bytes, these are at most the first `max_encoded_size(T, enc)` bytes
   of the caller's memory.
 
 For example, for a 24-bit unsigned integer `struct U24; x::UInt32; end` encoded in 3 bytes:
@@ -928,9 +929,9 @@ Encode `x` with the encoding `enc` at the start of `output`. Return `(n, rest)`,
 [`TooShort`](@ref) or [`Invalid()`](@ref Invalid). Use with [`@?`](@ref) in
 [`codec_try_encode!`](@ref), for encodings that contain the encodings of other values.
 
-As for [`decode_field`](@ref), when `output` is an `EncodeOutput{L}` with `L` at least
-`max_encoded_size(T, enc)`, `x` is encoded on the fast path, and `rest` is an
-`EncodeOutput{L - max_encoded_size(T, enc)}`.
+As for [`decode_field`](@ref), when `output` is known to hold at least
+`max_encoded_size(T, enc)` bytes, `x` is encoded on the fast path, and `rest` is known to
+hold the number of bytes that remain.
 """
 @inline function encode_field(output::EncodeOutput{L}, x::T, enc::Encoding) where {L, T}
     N = max_encoded_size(T, enc)

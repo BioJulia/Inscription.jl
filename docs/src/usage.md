@@ -69,7 +69,7 @@ These loads and stores are all or nothing, not in the sense of promising to be s
 
 The above throwing functions also have [`try_load`](@ref) and [`try_store`](@ref) equivalents. Like the encoding/decoding functions, they are slightly less efficient.
 
-In the rare case the stream you read from is not self-synchronizing - that is, it's not clear from the data where the value begins, [`load_exact`](@ref)`(::AbstractBufReader, n::Integer, ::Type{T}, ::Encoding)` and [`try_load_exact`](@ref) read a `T` from exactly `n` bytes of the reader.
+In the rare case the stream you read from is not self-synchronizing - that is, it's not clear from the data where the value ends, [`load_exact`](@ref)`(::AbstractBufReader, n::Integer, ::Type{T}, ::Encoding)` and [`try_load_exact`](@ref) read a `T` from exactly `n` bytes of the reader.
 Consider a hypothetical `Decimal` integer codec where the string "123" can be read as (1, 2, 3), (12, 3), (1, 23), or 123.
 Using `load` or `try_load`, the maximal length would be read, so 123 would be returned. To load (12, 3) instead, use `load_exact(io, 2, Int, Decimal())` then `load_exact(io, 1, Int, Decimal())`.
 
@@ -81,7 +81,7 @@ It stops, without throwing, if `dst` has no more space, the reader is at EOF, or
 Like the bulk encoding/decoding functions, it has no `try_` equivalent. To see why it stopped, check the length of `dst`, check whether the reader is at EOF, and call [`try_load`](@ref) to see the error.
 
 The number of elements loaded is decided by the implementation of the reader. The reader knows the optimal buffer size, so delegating the amount read per call to the reader improves performance.
-However, to guarantee forward progress, this function loads zero elements only if it is stopped by any of the above reasons, i.e. the reader cannot decide a buffer size of zero.
+However, to guarantee forward progress, this function loads zero elements only if it is stopped by one of the above reasons, i.e. the reader cannot decide a buffer size of zero.
 
 Use this function when you process a larger array in chunks, but have no strong opinion on the chunk size yourself.
 For example, a hashing function might need to process a large byte array, but operate on chunks of 8 `UInt64` values per round.

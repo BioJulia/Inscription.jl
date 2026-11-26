@@ -14,15 +14,15 @@ Alternatively, it can be viewed as an extension of BufferIO.jl, which only suppo
 You might want to use this package if you find yourself:
 * Using `unsafe_load`, `unsafe_store!` a lot,
 * Caring about how much `write(::IO, ::Float32)` allocates,
-* Find yourself writing non-`UInt8` data into `Vector{UInt8}`s for IO performance reasons.
+* Writing non-`UInt8` data into `Vector{UInt8}`s for IO performance reasons.
 
 You probably don't need this package if:
-* Mostly do I/O by writing strings or raw arrays e.g. to log files,
+* Mostly doing I/O by writing strings or raw arrays e.g. to log files,
 * Read/write specific formats like JSON, in which case you should use a package specific to that format.
 
 The major design goals of this package are:
 1. High performance. The abstractions of this package should be roughly on par with manual implementations using pointer operations and `reinterpret`. Users should rarely be discouraged from using BitScribbling abstractions due to performance.
-2. Present a hard-to-misuse API. BitScribbling APIs avoid making important behaviour implicit, such as platform endianness, platform-dependent struct padding, or performance traps due to slow fallback definitions. It attempts to guide users away from bugs.
+2. Present a hard-to-misuse API. BitScribbling APIs avoid making important behavior implicit, such as platform endianness, platform-dependent struct padding, or performance traps due to slow fallback definitions. It attempts to guide users away from bugs.
 
 Explicit **non**-goals of this package are:
 1. A simple API. This package prefers semantically consistent, precise, efficient, and hard-to-misuse APIs over easy APIs.
@@ -61,5 +61,5 @@ BitScribbling.jl is more fundamental, in the sense that it could be used to impl
 ## Limitations
 * BitScribbling.jl currently has poor support for packed binary values, such as reading a 22-bit and a 44-bit
   struct from 64 bits in total. For now, the package assumes types are read or written as an integer number of bytes.
-  Users can opt-in to padding to e.g. read/write an 18-bit primitive value as 24 bits (3 whole bytes).
+  Users can opt in to padding to e.g. read/write an 18-bit primitive value as 24 bits (3 whole bytes).
   See the [Implementing a type](custom.md) page for details.

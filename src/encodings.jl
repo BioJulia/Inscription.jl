@@ -132,8 +132,8 @@ struct NoCodec end
 """
     abstract type DecodeInput
 
-The input of [`codec_try_decode`](@ref): the bytes to decode a value from.
-This abstracts over `Memory`-backed input and `AbstractBufReader`-backed input.
+The input of [`codec_try_decode`](@ref): the bytes to decode a value from, at the start
+of a sequence of bytes. Not all bytes of the sequence may be available yet.
 
 A codec reads from `DecodeInput` only through these functions:
 * [`require_bytes(input, n)`](@ref require_bytes): the first `n` bytes, as a memory view
@@ -143,16 +143,19 @@ A codec reads from `DecodeInput` only through these functions:
 * [`decode_field(input, T, enc)`](@ref decode_field): a value of type `T` from the start,
   the number of bytes it used, and the input after them.
 
-These functions may return [`TooShort`](@ref), which can conveniently be returned
-early with [`@?`](@ref), as in `@? peek_byte(input, 1)`.
+These functions may return [`TooShort`](@ref) when the bytes they need are not
+available. A codec doesn't handle `TooShort` itself, but returns it, which can
+conveniently be done with [`@?`](@ref), as in `@? peek_byte(input, 1)`. The caller then
+decides what `TooShort` means: it may e.g. report that the input is truncated, or run the
+codec again once more bytes are available.
 
-When backed by a reader, these functions buffer more bytes from the reader as needed.
-They then return `TooShort` only if the input ends too early.
+Code only against `DecodeInput`. Its concrete subtypes are internal, and may change in any
+release.
 
 # Extended help
 ## Invalidated views
-When backed by a reader, buffering more bytes may invalidate previous views of the
-`DecodeInput`'s data from `require_bytes`.
+A read may make more bytes of the input available, which may invalidate previous views
+from `require_bytes`.
 To be correct for all inputs, a codec must follow these rules:
 
 * A call to [`require_bytes`](@ref), [`peek_byte`](@ref) or [`decode_field`](@ref) which
@@ -186,11 +189,10 @@ struct ReaderInput{R <: AbstractBufReader} <: DecodeInput
 end
 
 """
-    EncodeOutput{L}
+    EncodeOutput
 
 The output of [`codec_try_encode!`](@ref): the bytes to encode a value into.
-It is guaranteed to hold holds at least `L` bytes, and may contain more bytes.
-A codec should to to `EncodeOutput` only through the following functions:
+A codec writes to `EncodeOutput` only through the following functions:
 * [`reserve_bytes(output, n)`](@ref reserve_bytes): the first `n` bytes, as a mutable
   memory view of length `n`, for the codec to write;
 * [`encode_field(output, x, enc)`](@ref encode_field): encode `x` at the start, and
@@ -198,6 +200,9 @@ A codec should to to `EncodeOutput` only through the following functions:
 
 These functions may return [`TooShort`](@ref), which can conveniently be returned
 early with [`@?`](@ref), as in `@? reserve_bytes(output, 10)`.
+
+Code only against `EncodeOutput`. Its type parameters and fields are internal, and may
+change in any release.
 """
 struct EncodeOutput{L}
     mem::MutableMemoryView{UInt8}

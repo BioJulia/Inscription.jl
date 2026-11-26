@@ -1,6 +1,6 @@
 # Examples
-### Reading and writing simple binary values:
-This works similar to Base's `read` and `write` (for readers), and
+### Reading and writing simple binary values
+This works similarly to Base's `read` and `write` (for readers), and
 `unsafe_load`, `unsafe_store!` (for memory), although these functions
 are not unsafe.
 
@@ -76,7 +76,7 @@ store_every(wtr, f32s)
 ```
 
 ### Reading a composite type
-In this example, I read the top of a BGZF block header from an `AbstractBufReader`. This header consists of 8 integers of varying bit-widths, totalling 12 bytes in length.
+In this example, I read the top of a BGZF block header from an `AbstractBufReader`. This header consists of 8 integers of varying bit-widths, totaling 12 bytes in length.
 The example shows how I get a buffer of the required size once,
 then decode from the buffer with `@inbounds`, for maximal efficiency.
 
@@ -130,12 +130,12 @@ Header((0x00, 0x01), 0x02, 0x03, 0x07060504, 0x08, 0x09, 0x0b0a)
 ```
 
 ## Reading and writing custom types
-BitScribbling.jl requires you to opt-in reading or writing a struct.
-In the following examples, I'll demonstrate how to do so. I'll begin with structs that are easy to read/write, and each example will choose a type that has complications when reading/writing than the previous.
+BitScribbling.jl requires you to opt in to reading or writing a struct.
+In the following examples, I'll demonstrate how to do so. I'll begin with structs that are easy to read/write, and each example will choose a type that has more complications when reading/writing than the previous one.
 
 
 ### Custom struct 1: Entirely transparent (`BitsLoadable`)
-This type has no padding, all bitpatterns are valid, and its encoding is the same as its constituent bytes.
+This type has no padding, all bit patterns are valid, and its encoding is the same as its constituent bytes.
 So, it can be read and written via pointer operations.
 We can make BitScribbling use those by opting into the `BitsLoadable` trait.
 This will automatically make all reading and writing methods work.
@@ -166,7 +166,7 @@ Point2D(0.0, 0.0)
 
 ### Custom struct 2: Transparent, but need validation (`BitsStorable`)
 This type has no padding, and its encoding is the same as its constituent bytes.
-However, not all bitpatterns are valid.
+However, not all bit patterns are valid.
 That means it can be read and written via pointer ops, but read instances must be validated.
 We can do that by opting into the `BitsStorable` trait, and implementing the validation function `is_valid_bits`:
 
@@ -202,8 +202,8 @@ EvenInteger(3761688987579986996)
 ```
 
 ### Custom struct 3: Forward to an existing encoding (`Proxy`)
-This type has padding and so cannot be pointer-loadable. However, we can declare it can be read and written like an equivalent `Tuple` (which are special-cased by BitScribbling.jl to ignore padding).
-We implement the `Proxy` scheme and convert to/from that tuple.
+This type has padding and so cannot be pointer-loadable. However, we can declare it can be read and written like an equivalent `Tuple` (which is special-cased by BitScribbling.jl to ignore padding).
+We implement the `Proxy` codec scheme and convert to/from that tuple.
 
 An odd-sized primitive, such as a 17-bit integer, could use the same mechanism:
 Load a 32-bit integer, and check the unused 15 bits are zeroed out in `try_from_proxy`.
@@ -243,8 +243,8 @@ Padded(0x3837363534333231, 0x39)
 ```
 
 ### Custom struct 4: Manual codec, fixed length
-Here, I implement an encoding of `UInt32` that prints it as lowercase hexadecimal digits, zero left padded to 8 characters.
-Note that while `UInt32` in little/big endian encoding **is** pointer-read/writeable, its hexadecimal encoding obviously isn't, so this can neither be `BitsLoadable` or `BitsStorable`. Also, there is no equivalent encoding, so it can't be `Proxy`.
+Here, I implement an encoding of `UInt32` that prints it as lowercase hexadecimal digits, left-padded with zeros to 8 characters.
+Note that while `UInt32` in little/big endian encoding **is** pointer-readable/writable, its hexadecimal encoding obviously isn't, so this can be neither `BitsLoadable` nor `BitsStorable`. Also, there is no equivalent encoding, so it can't be a `Proxy`.
 
 Note that this example needs to define a new `Encoding`, and can't simply be `LittleEndian`, as that means storing `UInt32` as binary data.
 
@@ -306,7 +306,7 @@ function BitScribbling.codec_try_encode!(
         x::UInt32,
         ::LowerCaseHexadecimal
     )
-    # reserve_bytes is the same as require_bytes above, but for `EncodeOutput`
+    # `reserve_bytes` is the same as `require_bytes` above, but for `EncodeOutput`
     bytes = @? BitScribbling.reserve_bytes(output, 8)
     @inbounds for i in 8:-1:1
         (x, r) = divrem(x, UInt32(16))
@@ -327,8 +327,8 @@ encode!(mem, 0x0123abcf, LowerCaseHexadecimal())
 ### Custom struct 5: Manual codec, variable length
 Here, I write `UInt32` in *decimal* and *without* left padding with zeros.
 This adds two more complications compared to the example above:
-* When decoding, length can be arbitrarily long, since there can be any number of leading zeros
-* Even when encoding, output length is variable.
+* When decoding, the length can be arbitrarily long, since there can be any number of leading zeros
+* Even when encoding, the output length is variable.
 
 ```jldoctest
 using BitScribbling: BitScribbling, Encoding, load, store, @?

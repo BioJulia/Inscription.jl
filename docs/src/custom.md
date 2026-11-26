@@ -1,7 +1,7 @@
 # Implementing a codec for a custom type
-Instead of implementing optimized read and write methods for every combination of reading/writing function, I/O subtype, encoding scheme, and type,
-BitScribbling.jl abstracts this by asking you to implement one "codec" for each type/encoding scheme pair.
-Since most types only have a single encoding scheme, this usually means a single codec implementation per type to get a broad variety
+Instead of implementing optimized read and write methods for every combination of reading/writing function, I/O subtype, `Encoding`, and type,
+BitScribbling.jl abstracts this by asking you to implement one "codec" for each type/`Encoding` pair.
+Since most types only need one codec, this usually means one codec implementation per type to get a broad variety
 of encode, decode, load and store methods.
 
 ## Encodings and codecs
@@ -11,7 +11,7 @@ A type may be written in several different ways. For example, `0xa53b` may be wr
 * `34 32 32 39 39` in ASCII decimal
 ... and so on.
 
-This is modelled as zero-sized [`Encoding`](@ref) subtypes.
+This is modeled as zero-sized [`Encoding`](@ref) subtypes.
 Users may define arbitrary `Encoding`s and implement codecs for them.
 
 This API consists of three mandatory methods.
@@ -20,7 +20,7 @@ See their docstrings for details (click them to go to their docstring in this do
 * [`BitScribbling.codec_try_decode`](@ref) attempts to decode an instance of `T` from a [`BitScribbling.DecodeInput`](@ref).
 * [`BitScribbling.codec_try_encode!`](@ref) attempts to encode an instance of `T` into an [`BitScribbling.EncodeOutput`](@ref).
 
-`codec_try_decode` reads its input through [`BitScribbling.require_bytes`](@ref), [`BitScribbling.peek_byte`](@ref) and [`BitScribbling.decode_field`](@ref), and `codec_try_encode!` writes its output through [`BitScribbling.reserve_bytes`](@ref) and [`BitScribbling.encode_field`](@ref). When loading from an `AbstractBufReader`, these make the reader wait for exactly the bytes the codec reads, so a codec for a variable-length encoding, like `Char`'s `UTF8` encoding, doesn't make loading wait for the maximal number of bytes of any instance of `T`. A codec is compiled several times: for memory known to hold the maximal number of bytes, where the checks of these functions are removed; for shorter memory, near the end of the data; and for readers whose buffer must be filled. When it must be filled, views from `require_bytes` may be invalidated by later reads, see [`BitScribbling.DecodeInput`](@ref).
+`codec_try_decode` reads its input through [`BitScribbling.require_bytes`](@ref), [`BitScribbling.peek_byte`](@ref) and [`BitScribbling.decode_field`](@ref), and `codec_try_encode!` writes its output through [`BitScribbling.reserve_bytes`](@ref) and [`BitScribbling.encode_field`](@ref). When loading from an `AbstractBufReader`, these make the reader wait for exactly the bytes the codec reads, so a codec for a variable-length encoding, like `Char`'s `UTF8` encoding, doesn't make loading wait for the maximal number of bytes of any instance of `T`. When the input is known to hold the maximal number of bytes, as it usually is, the checks of these functions for constant sizes are compiled away. Code only against the abstract `DecodeInput` and `EncodeOutput`: a codec is compiled for several internal input and output types, and must not depend on which one it gets. In particular, its input may not have all bytes available yet. Reads may make more bytes available, which may invalidate views from earlier reads, and the codec may be run again on the same bytes. See [`BitScribbling.DecodeInput`](@ref).
 
 ## Deriving codecs automatically
 Instead of implementing a codec, a type can get one from its [`CodecScheme`](@ref BitScribbling.CodecScheme), by adding a method to
@@ -120,7 +120,7 @@ Functions with arguments that are converted, such as a `Vector{UInt8}`, and the 
 With a codec, `decode`, `encode!` and `store` do not use the methods of the `try_` functions.
 
 ### Signatures
-To avoid method ambiguities, and methods that are not called for some arguments:
+To avoid method ambiguities and methods that are not called for some arguments:
 * Let the types of the memory be `MemoryView{UInt8}` for bytes that are only read, and `MutableMemoryView{UInt8}` for bytes
   that are written. Likewise, let the elements be `MemoryView{MyType}` and `MutableMemoryView{MyType}`.
   Do not leave the argument untyped.

@@ -205,8 +205,8 @@ Returned by the functions that a codec reads or writes bytes through, when the i
 output is too short, and returned by the codec with [`@?`](@ref). See
 [`DecodeInput`](@ref) and [`EncodeOutput`](@ref). A codec does not construct it itself.
 
-When decoding partial input, `TooShort` means that more bytes are needed to decide the
-result. A codec never returns it when its input or output has [`max_encoded_size`](@ref)
+When decoding, `TooShort` may also mean that more bytes are needed to decide the result
+than are available yet. A codec never returns it when its input or output has [`max_encoded_size`](@ref)
 bytes.
 
 See also: [`Invalid`](@ref)
