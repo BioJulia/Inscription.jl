@@ -189,6 +189,18 @@ end
     @test occursin("whose bit width 24 is not a power of two of at least 8", message(WithU24))
     # The stricter rule rejects `WithU256` although it has no padding on this platform
     @test fieldoffset(WithU256, 2) == 16 && sizeof(WithU256) == 48 || Base.datatype_alignment(U256) == 32
+
+    # The padding check is available on its own, independent of the codec scheme
+    is_padding_free = BitScribbling.is_padding_free
+    for T in (Ordered, ExplicitPadding, WithU256Aligned, Plain, Header, Tuple{UInt8, UInt8, UInt16}, UInt64, Empty)
+        @test is_padding_free(T)
+    end
+    for T in (Padded, WithPadded, Misaligned, TrailingPadding, MisalignedNested, WithU256, WithU24, Tuple{UInt8, UInt16})
+        @test !is_padding_free(T)
+    end
+    @test_throws ArgumentError is_padding_free(Vector{UInt8})
+    @test_throws ArgumentError is_padding_free(Integer)
+    @test is_padding_free(Ordered) === @inferred (() -> is_padding_free(Ordered))()
     # Accepted structs round-trip
     for x in (
                 Ordered(0x0102030405060708, 0x090a0b0c, 0x0d0e, 0x0f, 0x10),

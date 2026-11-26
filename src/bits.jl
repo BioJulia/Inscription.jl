@@ -180,9 +180,28 @@ function bits_type_error_checks(T::Type)::Vector{Any}
             ),
         ]
     end
+    padding = padding_error(T)
+    if padding !== nothing
+        S, reason = padding
+        return [
+            if S === T
+                :(
+                    return tuple(
+                        "`", T, "` has padding on some or all platforms, so it can't be `",
+                        scheme_name(kind), "`: ", $(reason...)
+                    )
+                )
+            else
+                :(
+                    return tuple(
+                        "`", T, "` can't be `", scheme_name(kind), "`, since `", $S,
+                        "` has padding on some or all platforms: ", $(reason...)
+                    )
+                )
+            end,
+        ]
+    end
     checks = []
-    # The offset of the next field in the strictest layout, see the docstring of `BitsLoadable`
-    offset = 0
     for i in 1:fieldcount(T)
         F = fieldtype(T, i)
         name = string(fieldname(T, i))
@@ -204,20 +223,7 @@ function bits_type_error_checks(T::Type)::Vector{Any}
                 end
             end
         )
-        if isprimitivetype(F)
-            n_bits = bit_size(F)
-            if !(n_bits ≥ 8 && ispow2(n_bits))
-                push!(
-                    checks, :(
-                        return tuple(
-                            "The field `", $name, "` of `", T, "` has the type `", $F,
-                            "`, whose bit width ", $n_bits, " is not a power of two of at least 8"
-                        )
-                    )
-                )
-                return checks
-            end
-        else
+        if !isprimitivetype(F)
             push!(
                 checks, quote
                     message = bits_type_error($F, $field_kind, enc)
@@ -225,54 +231,113 @@ function bits_type_error_checks(T::Type)::Vector{Any}
                 end
             )
         end
+    end
+    return checks
+end
+
+"""
+    is_padding_free(T::Type)::Bool
+
+Return whether the bits type `T` is guaranteed to have no padding on any platform.
+This is one of the requirements for `T` to be [`BitsLoadable`](@ref) or [`BitsStorable`](@ref).
+Throw an `ArgumentError` if `T` is not a bits type, i.e. if `isbitstype(T)` is `false`.
+
+Since the alignment of types differs between platforms, `T` is checked against the
+strictest layout any platform could give it:
+* A primitive type is aligned to its size. Primitive types must have a bit width that is a
+  multiple of 8, and primitive fields of structs a bit width that is a power of two of
+  at least 8.
+* A struct is aligned to the alignment of its most aligned field.
+
+`T` is padding-free if each of its fields begins right where the previous one ends, its
+size is the sum of the sizes of its fields, and each of its fields is padding-free.
+Therefore, a type that has no padding on the current platform may still not be padding-free.
+
+This function only depends on the layout of `T`, not on its [`codec_scheme`](@ref).
+Calls with a constant `T` are constant-folded.
+
+# Examples
+```jldoctest
+julia> struct Unordered; a::UInt32; b::UInt64; end
+
+julia> struct Ordered; b::UInt64; a::UInt32; c::UInt32; end
+
+julia> BitScribbling.is_padding_free(Unordered)
+false
+
+julia> BitScribbling.is_padding_free(Ordered)
+true
+
+julia> BitScribbling.is_padding_free(Tuple{UInt16, Tuple{UInt8, UInt8}})
+true
+```
+
+See also: [`CodecScheme`](@ref)
+"""
+@generated function is_padding_free(::Type{T})::Bool where {T}
+    isbitstype(T) || return :(throw_not_bits_type(T))
+    return padding_error(T) === nothing
+end
+
+@noinline function throw_not_bits_type(@nospecialize(T::Type))
+    throw(ArgumentError(lazy"`$T` is not a bits type, so its padding is not defined"))
+end
+
+# Where the bits type T has padding in the strictest layout of any platform, see
+# `is_padding_free`, or `nothing` if it has none. The padding is found in `S`, which is
+# T or the type of a field nested in T, and `reason` is a tuple of the parts of a message
+# saying where in `S` the padding is. This only uses Base reflection, so it can be used
+# in generators.
+function padding_error(T::Type)::Union{Nothing, Tuple{Type, Tuple}}
+    if isprimitivetype(T)
+        n_bits = bit_size(T)
+        n_bits % 8 == 0 && return nothing
+        return (T, ("its bit width ", n_bits, " is not a multiple of 8"))
+    end
+    # The offset of the next field in the strictest layout
+    offset = 0
+    for i in 1:fieldcount(T)
+        F = fieldtype(T, i)
+        name = string(fieldname(T, i))
+        if isprimitivetype(F)
+            n_bits = bit_size(F)
+            if !(n_bits ≥ 8 && ispow2(n_bits))
+                return (
+                    T, (
+                        "its field `", name, "` has the type `", F, "`, whose bit width ",
+                        n_bits, " is not a power of two of at least 8",
+                    ),
+                )
+            end
+        else
+            padding = padding_error(F)
+            padding === nothing || return padding
+        end
         alignment = strictest_alignment(F)
         if offset % alignment != 0
             of_what = isprimitivetype(F) ? "its type `" : "the largest primitive field of its type `"
-            push!(
-                checks, :(
-                    return tuple(
-                        "`", T, "` has padding on some or all platforms, so it can't be `",
-                        scheme_name(kind), "`: its field `", $name, "` follows ", $offset,
-                        " bytes of other fields, which is not a multiple of ", $alignment,
-                        ", the size of ", $of_what, $F, "`"
-                    )
-                )
+            return (
+                T, (
+                    "its field `", name, "` follows ", offset, " bytes of other fields, which ",
+                    "is not a multiple of ", alignment, ", the size of ", of_what, F, "`",
+                ),
             )
-            return checks
         end
         # This holds if every primitive type is aligned to at most its size
-        if offset != fieldoffset(T, i)
-            push!(
-                checks, :(
-                    return tuple(
-                        "`", T, "` has padding before its field `", $name, "`, so it can't be `",
-                        scheme_name(kind), "`"
-                    )
-                )
-            )
-            return checks
-        end
+        offset == fieldoffset(T, i) || return (T, ("it has padding before its field `", name, "`"))
         offset += sizeof(F)
     end
     alignment = strictest_alignment(T)
     if offset % alignment != 0
-        push!(
-            checks, :(
-                return tuple(
-                    "`", T, "` has padding on some or all platforms, so it can't be `",
-                    scheme_name(kind), "`: its fields have ", $offset, " bytes, which is not a ",
-                    "multiple of ", $alignment, ", the size of its largest primitive field"
-                )
-            )
-        )
-    elseif offset != sizeof(T)
-        push!(
-            checks, :(
-                return tuple("`", T, "` has padding at its end, so it can't be `", scheme_name(kind), "`")
-            )
+        return (
+            T, (
+                "its fields have ", offset, " bytes, which is not a multiple of ", alignment,
+                ", the size of its largest primitive field",
+            ),
         )
     end
-    return checks
+    offset == sizeof(T) || return (T, ("it has padding at its end",))
+    return nothing
 end
 
 # The number of bytes of the encoding of a bits type. The bit width of primitive types

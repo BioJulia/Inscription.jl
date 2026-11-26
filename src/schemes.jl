@@ -39,11 +39,8 @@ A type `T` can be `BitsLoadable` if:
 * `isbitstype(T)`,
 * `T` does not have size zero
 * If `T` is a struct, all its fields must be `BitsLoadable`
-* `T` must have no padding on any platform. The padding check is done by assuming
-   the alignment of any primitive is equal to the next power of two equal to or
-   larger than its bitsize, and that the alignment of any struct is equal to its largest field.
-   This is the most conservative possible rule.
-   This also rules out primitive types whose bit size is not a multiple of 8.
+* `T` must have no padding on any platform, i.e. [`is_padding_free(T)`](@ref is_padding_free)
+  must be `true`.See [`is_padding_free(T)`](@ref is_padding_free) for details.
 * Its [`NATIVE_ENDIAN`](@ref) encoding is the same as its in-memory representation,
   i.e. for `x::T`, the encoding is exactly equal to `reinterpret(UInt8, [x])`.
 * Every bit pattern is a valid `T`.
