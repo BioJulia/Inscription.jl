@@ -233,9 +233,17 @@ struct Invalid end
 """
     @? expr
 
-Evaluate `expr`. If the result is a [`DecodeError`](@ref), an [`EncodeError`](@ref),
-[`TooShort`](@ref) or [`Invalid`](@ref), return it from the enclosing function.
-Otherwise, the macro evaluates to the result.
+Expands to the equivalent of the following, except that the variable is an
+anonymous local variable and so cannot clash with any variable from the enclosing scope:
+
+```julia
+x = expr
+if x isa Union{DecodeError, EncodeError, TooShort, Invalid}
+    return x
+else
+    x
+end
+```
 
 # Examples
 ```jldoctest

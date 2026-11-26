@@ -28,6 +28,9 @@ makedocs(
     ],
     authors = "Jakob Nybo Andersen",
     checkdocs = :public,
+    # The functions in these modules have docstrings for the REPL, but are deliberately
+    # left out of the reference page, since they just forward to BitScribbling's functions.
+    checkdocs_ignored_modules = [BitScribbling.Little, BitScribbling.Big],
 )
 
 deploydocs(;

@@ -32,7 +32,7 @@ This codec scheme means `T` is transparently read/writable using a pointer load/
 To implement `BitsLoadable`, type `T` needs nothing other than to define:
 
 ```
-BitScribbling.codec_scheme(::Type{T}, ::Endianness) = BitScribbling.BitsLoadable()
+codec_scheme(::Type{T}, ::Endianness) = BitsLoadable()
 ```
 
 A type `T` can be `BitsLoadable` if:
@@ -56,8 +56,8 @@ a pointer load, except not all bitpatterns are valid, and therefore the bits mus
 To implement `BitsStorable`, type `T` needs to implement:
 
 ```
-BitScribbling.codec_scheme(::Type{T}, ::Endianness) = BitScribbling.BitsStorable()
-BitScribbling.is_valid_bits(::Type{T}, ::NTuple{sizeof(T), UInt8}) = ...
+codec_scheme(::Type{T}, ::Endianness) = BitsStorable()
+is_valid_bits(::Type{T}, ::NTuple{sizeof(T), UInt8}) = ...
 ```
 
 `BitsStorable` has the same restrictions as `BitsLoadable`, except:
@@ -72,13 +72,24 @@ For example, a type
 To implement `Proxy{P}`, type `T` for encoding `E` needs to implement:
 
 ```julia
-BitScribbling.codec_scheme(::Type{T}, ::E) = BitScribbling.Proxy{P}()
-BitScribbling.try_to_proxy(::T, ::E)::Union{P, Invalid} = ...
-BitScribbling.try_from_proxy(::Type{T}, ::P, ::E)::Union{T, Invalid} = ...
+codec_scheme(::Type{T}, ::E) = Proxy{P}()
+try_to_proxy(::T, ::E)::Union{P, Invalid} = ...
+try_from_proxy(::Type{T}, ::P, ::E)::Union{T, Invalid} = ...
 ```
 
 Any type can be `Proxy`, but it only makes sense to implement if `T` can be
 easily created from / used to create a `P`, which already has an encoding.
+
+## `Manual`
+The fallback codec.
+
+To implement a `Manual` codec for type `T` over encoding `E`, you should implement:
+
+```julia
+codec_max_encoded_size(::Type{T}, ::E)::Union{Val{N}, Unbounded()}
+codec_try_decode(::DecodeInput, ::Type{T}, ::E)::Union{Tuple{T, Int}, Invalid, TooShort}
+codec_try_encode!(::EncodeOutput, ::T, ::E)::Union{Int, Invalid, TooShort}
+```
 """
 abstract type CodecScheme end
 

@@ -2,19 +2,18 @@
     abstract type Encoding end
 
 `Encoding` are zero-sized trait structs used to signal how one value
-of a given type `T` is encoded to bytes, and decoded from bytes.
-`T` needn't be a bitstype. Every encoding of a `T` must have a size of at most
-[`max_encoded_size(T, enc)`](@ref max_encoded_size) bytes, unless that is [`Unbounded`](@ref).
+of a given type `T` is encoded to a given encoding, i.e. sequence of bytes,
+and decoded from the encodings.
+
 Thus, reading and writing behaviour is governed by the pair `(T, enc::Encoding)`.
 Such an implementation over a pair is called a "codec".
-Given a single implementation of a codec, encoding, and decoding to and from `MemoryView`,
-and loading and storing to all `AbstractBufReader`s and `AbstractBufWriter`s automatically
-work.
+BitScribbling's functions like `load`, `store_all`, `decode_every`,
+etc. use the codecs as their inner kernel.
 
 Users are free to define their own `Encoding`s and implement codecs for them.
 
 Two `Encoding`s are special: [`LittleEndian`](@ref) and [`BigEndian`](@ref),
-together referred to as Endian `Encoding`s.
+together referred to as Endian `Encoding`s (`Endianness`).
 Conceptually, these signal loading and storing the raw bits of the value of `T`.
 For example, encoding the `UInt32` `0x01020304` in `LittleEndian` encodes it
 to the following bytes `[0x04, 0x03, 0x02, 0x01]`.
@@ -23,20 +22,7 @@ Codecs for Endian `Encoding`s can be automatically implemented by declaring the 
 [`BitsLoadable`](@ref) or [`BitsStorable`](@ref), and a type can be encoded as another
 type with any encoding by declaring a [`Proxy`](@ref). See [`CodecScheme`](@ref).
 
-See also: [`Endianness`](@ref)
-
-# Extended help
-## Manually implementing a codec
-Before doing so, check if you can opt into already-generated codecs via
-[`CodecScheme`](@ref).
-
-A hand-written codec for `T` and an encoding type `E` consists of three methods:
-* [`codec_max_encoded_size(::Type{T}, ::E)`](@ref codec_max_encoded_size)
-* [`codec_try_decode(input::DecodeInput, ::Type{T}, ::E)`](@ref codec_try_decode)
-* [`codec_try_encode!(output::EncodeOutput, x::T, ::E)`](@ref codec_try_encode!)
-
-To avoid ambiguity errors, `E` must be a concrete encoding type. Do not implement
-codecs for non-concrete types such as `Encoding` or `Endianness`.
+See also: [`Endianness`](@ref), [`CodecScheme`](@ref)
 """
 abstract type Encoding end
 
@@ -151,24 +137,17 @@ This abstracts over `Memory`-backed input and `AbstractBufReader`-backed input.
 
 A codec reads from `DecodeInput` only through these functions:
 * [`require_bytes(input, n)`](@ref require_bytes): the first `n` bytes, as a memory view
-  of length `n`;
+  of length `n`,
 * [`peek_byte(input, i)`](@ref peek_byte): the byte at index `i`, or `nothing` if the
-  input ends before it. For encodings whose end is decided by the byte after it;
+  input ends before it,
 * [`decode_field(input, T, enc)`](@ref decode_field): a value of type `T` from the start,
   the number of bytes it used, and the input after them.
 
 These functions may return [`TooShort`](@ref), which can conveniently be returned
 early with [`@?`](@ref), as in `@? peek_byte(input, 1)`.
 
-When backed by a reader, these functions buffer more bytes from the reader as needed, so
-the codec is not restarted. They then return `TooShort` only if the input ends too early.
-
-When backed by memory, the input is *partial* if more bytes may follow the memory, e.g.
-when bulk loading elements that are already buffered. Then, `TooShort` means that more
-bytes are needed to decide the result, and the element is decoded again later, from its
-start. Otherwise, `TooShort` means that the input ends too early.
-
-The input of a bounded codec ends after `max_encoded_size(T, enc)` bytes.
+When backed by a reader, these functions buffer more bytes from the reader as needed.
+They then return `TooShort` only if the input ends too early.
 
 # Extended help
 ## Invalidated views
@@ -209,21 +188,16 @@ end
 """
     EncodeOutput{L}
 
-The output of [`codec_try_encode!`](@ref): the bytes to encode a value into. It holds at
-least `L` bytes. A codec writes it only through these functions, and returns their
-[`TooShort`](@ref) with [`@?`](@ref):
+The output of [`codec_try_encode!`](@ref): the bytes to encode a value into.
+It is guaranteed to hold holds at least `L` bytes, and may contain more bytes.
+A codec should to to `EncodeOutput` only through the following functions:
 * [`reserve_bytes(output, n)`](@ref reserve_bytes): the first `n` bytes, as a mutable
   memory view of length `n`, for the codec to write;
 * [`encode_field(output, x, enc)`](@ref encode_field): encode `x` at the start, and
   return the number of bytes written, and the output after them.
 
-As for [`DecodeInput`](@ref), `L` is usually
-[`max_encoded_size(T, enc)`](@ref max_encoded_size), and the checks of the writes within
-the first `L` bytes are removed when the codec is compiled. Near the end of the memory,
-`L` is zero.
-
-The output ends after `max_encoded_size(T, enc)` bytes, also if the memory continues, so
-a codec can't write beyond them.
+These functions may return [`TooShort`](@ref), which can conveniently be returned
+early with [`@?`](@ref), as in `@? reserve_bytes(output, 10)`.
 """
 struct EncodeOutput{L}
     mem::MutableMemoryView{UInt8}

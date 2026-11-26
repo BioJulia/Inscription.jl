@@ -4,14 +4,10 @@ Modules = [BitScribbling]
 Order   = [:module, :type, :constant, :macro, :function]
 ```
 
-## Little
+## Little and Big
 ```@autodocs
-Modules = [BitScribbling.Little]
-```
-
-## Big
-```@autodocs
-Modules = [BitScribbling.Big]
+Modules = [BitScribbling.Little, BitScribbling.Big]
+Filter = t -> t isa Module
 ```
 
 ## DecodeErrorKinds
