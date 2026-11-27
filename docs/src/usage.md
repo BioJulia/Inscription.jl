@@ -30,6 +30,23 @@ The full list of functions in these modules is on the [Reference](reference.md) 
 # Encoding and decoding
 The functions mentioned below: [`encode!`](@ref), [`decode`](@ref), [`decode_exact`](@ref) and [`decode_next`](@ref) each have `try_*` versions. The plain functions throw exceptions on errors, whereas the `try_` versions return the exception instead. On the happy path, the throwing versions are slightly more efficient, so use the `try_` versions only if you plan to actually handle errors.
 
+### Errors
+A [`DecodeError`](@ref) or [`EncodeError`](@ref) has a `kind`, which says what went wrong, and a `payload`.
+The payload is `Some(x)` when the data is invalid or the value can't be encoded, where `x` says why, and `nothing` otherwise.
+For example, a codec that parses decimal integers may give the payload `Some(Overflow)`, so that you can try again with a wider type.
+Since a failed load consumes nothing, the second try reads the same bytes:
+
+```julia
+x = try_load(io, UInt8, Decimal())
+if x isa DecodeError && x.payload == Some(Overflow)
+    x = try_load(io, UInt16, Decimal())
+end
+```
+
+A codec that gives no reason gives the payload `Some(nothing)`.
+The errors of a type have the same concrete type for every kind, so checking them is cheap.
+Compare errors with `==`, which compares their kind and payload, but not their type, or check `err.kind` directly.
+
 ### Encoding values
 Encoding functions generally have the signature `(try_)encode!(mem, [i::Integer], x, ::Encoding)`, and they mean: Encode `x` into `mem` starting at position `i` with the given `Encoding`, and return how many bytes were written (or an error, for the `try_` variant).
 The argument `mem` is converted to a `MutableMemoryView{UInt8}`.

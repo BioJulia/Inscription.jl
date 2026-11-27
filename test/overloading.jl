@@ -244,18 +244,18 @@ over(:store_into, :try_store)
     for bytes in (b"hello\0wor", b"hello\0")
         io = CursorReader(collect(bytes))
         kind = length(bytes) == 6 ? EndOfInput : Truncated
-        @test_throws DecodeError(kind) load_every!(io, Vector{T}(undef, 2), e)
+        @test_error DecodeError(kind) load_every!(io, Vector{T}(undef, 2), e)
         @test read(io) == bytes[7:end] # nothing of the failing element is consumed
     end
-    @test_throws DecodeError(Truncated) load(CursorReader(UInt8['a']), T, e)
+    @test_error DecodeError(Truncated) load(CursorReader(UInt8['a']), T, e)
     T = Over{(:decode_all!, :try_decode_next)}
-    @test_throws DecodeError(Truncated) decode_every!(Vector{T}(undef, 2), b"hello\0wor" |> collect, e)
+    @test_error DecodeError(Truncated) decode_every!(Vector{T}(undef, 2), b"hello\0wor" |> collect, e)
     T = Over{(:encode_all!, :try_encode!)}
     @test_throws LightBoundsError encode_every!(zeros(UInt8, 8), hello_world(T), e)
-    @test_throws EncodeError(InvalidValue) encode_every!(zeros(UInt8, 20), [T("a"), T("b\0")], e)
+    @test_error EncodeError(InvalidValue) encode_every!(zeros(UInt8, 20), [T("a"), T("b\0")], e)
     T = Over{(:store_into, :try_store)}
     io = VecWriter()
-    @test_throws EncodeError(InvalidValue) store_every(io, [T("a"), T("b\0")], e)
+    @test_error EncodeError(InvalidValue) store_every(io, [T("a"), T("b\0")], e)
     @test io.vec == b"a\0"
     # Without the function that reports the error, the error is that there is no codec
     T = Over{(:load_into!,)}
@@ -278,19 +278,19 @@ const FOUR = over(:try_decode_next, :try_encode!, :try_load, :try_store)
     mem = collect(b"hello")
     @test is_err(try_decode(mem, T, e), Truncated)
     @test is_err(try_decode(mem, 6, T, e), EndOfInput)
-    @test_throws DecodeError(Truncated) decode(mem, T, e)
-    @test_throws DecodeError(EndOfInput) decode_next(mem, 6, T, e)
+    @test_error DecodeError(Truncated) decode(mem, T, e)
+    @test_error DecodeError(EndOfInput) decode_next(mem, 6, T, e)
     @test is_err(try_decode_exact(TWO, T, e), TrailingData)
-    @test_throws DecodeError(TrailingData) decode_exact(TWO, T, e)
+    @test_error DecodeError(TrailingData) decode_exact(TWO, T, e)
     for f in (try_decode, decode, decode_next, try_decode_exact, decode_exact), i in (0, 7)
         @test_throws LightBoundsError f(mem, i, T, e)
     end
     @test is_err(try_load_exact(CursorReader(TWO), 5, T, e), Truncated)
     @test is_err(try_load_exact(CursorReader(TWO), 12, T, e), TrailingData)
     @test_throws LightBoundsError encode!(zeros(UInt8, 5), T("hello"), e)
-    @test_throws EncodeError(InvalidValue) encode!(zeros(UInt8, 5), T("a\0"), e)
+    @test_error EncodeError(InvalidValue) encode!(zeros(UInt8, 5), T("a\0"), e)
     io = VecWriter()
-    @test_throws EncodeError(InvalidValue) store(io, T("a\0"), e)
+    @test_error EncodeError(InvalidValue) store(io, T("a\0"), e)
     @test isempty(io.vec)
 end
 
@@ -351,6 +351,6 @@ end
     @test load_every!(CursorReader([0x01, 0x02, 0x03]), dst, BigEndian()) == 3
     @test dst == [Fast(0x01), Fast(0x02), Fast(0x03)]
     @test FAST_CALLS[] == 3
-    @test_throws DecodeError(EndOfInput) load_every!(CursorReader([0x01]), dst, BigEndian())
+    @test_error DecodeError(EndOfInput) load_every!(CursorReader([0x01]), dst, BigEndian())
     @test load(CursorReader([0x07]), Fast, BigEndian()) == Fast(0x07)
 end

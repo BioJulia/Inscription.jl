@@ -136,7 +136,7 @@ end
         end
         for i in 1:n_max
             x = unsafe_decode_bits(kind, src, (i - 1) * element_size, T, enc)
-            x isa DecodeError && return (i - 1, (i - 1) * element_size)
+            x isa Invalid && return (i - 1, (i - 1) * element_size)
             @inbounds dst[i] = x
         end
         return (n_max, n_max * element_size)
@@ -340,7 +340,7 @@ julia> load_into!(io, MemoryView(dst), BigEndian())
 (0, 0)
 
 julia> try_load(io, UInt16, BigEndian())
-DecodeError(BitScribbling.DecodeErrorKinds.Truncated)
+DecodeError{Union{}}(BitScribbling.DecodeErrorKinds.Truncated)
 ```
 """
 function load_into!(

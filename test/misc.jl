@@ -20,7 +20,7 @@
     @test start_inbounds(mem, UInt16, BigEndian()) === 0x0102
     @test exact_inbounds(mem, 4, UInt16, BigEndian()) === 0x0405
     # Whether bytes remain is always checked
-    @test_throws DecodeError(TrailingData) exact_inbounds(mem, 1, UInt16, BigEndian())
+    @test_error DecodeError(TrailingData) exact_inbounds(mem, 1, UInt16, BigEndian())
     @test little_inbounds(mem, 4) === (0x0504, 6)
     v = zeros(UInt8, 6)
     @test encode_inbounds!(MemoryView(v), 3, 0x01020304, BigEndian()) === 4
@@ -29,12 +29,12 @@
     @test v == [0x07, 0x08, 0x01, 0x02, 0x03, 0x04]
 
     # The data is still validated
-    @test_throws DecodeError(InvalidData) decode_inbounds(MemoryView([0x02]), 1, Bool, LittleEndian())
-    @test_throws DecodeError(InvalidData) decode_inbounds(MemoryView([0x00, 0x00]), 1, Fruit, LittleEndian())
-    @test_throws DecodeError(InvalidData) decode_inbounds(MemoryView([0x00, 0x00, 0x02, 0x03]), 1, Flagged, BigEndian())
-    @test try_decode_inbounds(MemoryView([0x02]), 1, Bool, LittleEndian()) === DecodeError(InvalidData)
-    @test try_decode_inbounds(MemoryView([0x00, 0x00]), 1, Fruit, LittleEndian()) === DecodeError(InvalidData)
-    @test try_decode_inbounds(MemoryView([0x00, 0x00, 0x02, 0x03]), 1, Flagged, BigEndian()) === DecodeError(InvalidData)
+    @test_error DecodeError(InvalidData) decode_inbounds(MemoryView([0x02]), 1, Bool, LittleEndian())
+    @test_error DecodeError(InvalidData) decode_inbounds(MemoryView([0x00, 0x00]), 1, Fruit, LittleEndian())
+    @test_error DecodeError(InvalidData) decode_inbounds(MemoryView([0x00, 0x00, 0x02, 0x03]), 1, Flagged, BigEndian())
+    @test try_decode_inbounds(MemoryView([0x02]), 1, Bool, LittleEndian()) == DecodeError(InvalidData)
+    @test try_decode_inbounds(MemoryView([0x00, 0x00]), 1, Fruit, LittleEndian()) == DecodeError(InvalidData)
+    @test try_decode_inbounds(MemoryView([0x00, 0x00, 0x02, 0x03]), 1, Flagged, BigEndian()) == DecodeError(InvalidData)
 
     # The checks of a hand-written codec are its own, and always run
     @test try_decode(MemoryView([0x00]), Bool, Probe()) === true
@@ -53,18 +53,18 @@
         # are within a larger memory.
         backing = MemoryView([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08])
         short = backing[3:4]
-        @test try_decode(short, 2, UInt32, BigEndian()) === DecodeError(Truncated)
+        @test try_decode(short, 2, UInt32, BigEndian()) == DecodeError(Truncated)
         # The `try_` functions ignore `@inbounds`
-        @test try_decode_inbounds(short, 2, UInt32, BigEndian()) === DecodeError(Truncated)
-        @test next_inbounds(short, 2, UInt32, BigEndian()) === DecodeError(Truncated)
-        @test try_decode_inbounds(short, 3, UInt32, BigEndian()) === DecodeError(EndOfInput)
+        @test try_decode_inbounds(short, 2, UInt32, BigEndian()) == DecodeError(Truncated)
+        @test next_inbounds(short, 2, UInt32, BigEndian()) == DecodeError(Truncated)
+        @test try_decode_inbounds(short, 3, UInt32, BigEndian()) == DecodeError(EndOfInput)
         @test_throws LightBoundsError try_decode_inbounds(short, 0, UInt32, BigEndian())
-        @test try_encode_inbounds!(backing[1:2], 2, 0xaabbccdd, BigEndian()) === EncodeError(InsufficientSpace)
+        @test try_encode_inbounds!(backing[1:2], 2, 0xaabbccdd, BigEndian()) == EncodeError(InsufficientSpace)
         @test_throws LightBoundsError try_encode_inbounds!(backing[1:2], 4, 0xaabbccdd, BigEndian())
         @test decode_inbounds(short, 3, UInt16, BigEndian()) === 0x0506
         @test start_inbounds(short, UInt32, LittleEndian()) === 0x06050403
         @test little_inbounds(short, 2) === (0x0504, 4)
-        @test try_encode!(backing[1:2], 2, 0xaabbccdd, BigEndian()) === EncodeError(InsufficientSpace)
+        @test try_encode!(backing[1:2], 2, 0xaabbccdd, BigEndian()) == EncodeError(InsufficientSpace)
         @test_throws LightBoundsError encode!(backing[1:2], 2, 0xaabbccdd, BigEndian())
         @test encode_inbounds!(backing[1:2], 2, 0xa1b1c1d1, BigEndian()) === 4
         @test collect(backing) == [0x01, 0xa1, 0xb1, 0xc1, 0xd1, 0x06, 0x07, 0x08]
@@ -127,7 +127,7 @@ end
     for b in (bytes, Memory{UInt8}(bytes), view(bytes, 1:6))
         @test try_decode(b, UInt32, BigEndian()) === try_decode(mem, UInt32, BigEndian())
         @test try_decode(b, 3, UInt32, BigEndian()) === try_decode(mem, 3, UInt32, BigEndian())
-        @test try_decode(b, 4, UInt32, BigEndian()) === DecodeError(Truncated)
+        @test try_decode(b, 4, UInt32, BigEndian()) == DecodeError(Truncated)
         @test decode(b, UInt16, LittleEndian()) === 0x0201
         @test decode(b, 5, UInt16, LittleEndian()) === 0x0605
         @test try_decode_next(b, 2, UInt16, BigEndian()) === (0x0203, 4)
@@ -137,7 +137,7 @@ end
     v = zeros(UInt8, 5)
     @test try_encode!(v, 0x0102, BigEndian()) === 2
     @test try_encode!(v, 4, 0x0304, BigEndian()) === 2
-    @test try_encode!(v, 5, 0x0304, BigEndian()) === EncodeError(InsufficientSpace)
+    @test try_encode!(v, 5, 0x0304, BigEndian()) == EncodeError(InsufficientSpace)
     @test v == [0x01, 0x02, 0x00, 0x03, 0x04]
     @test encode!(view(v, 2:5), 'é', UTF8()) === 2
     @test encode!(v, 5, 0x09, BigEndian()) === 1
@@ -217,11 +217,11 @@ end
         @test M.try_decode_next(MemoryView(bytes), 2, UInt32) === try_decode_next(MemoryView(bytes), 2, UInt32, E)
         @test M.decode_next(MemoryView(bytes), 4, UInt16) === decode_next(MemoryView(bytes), 4, UInt16, E)
         @test M.try_decode_exact(MemoryView(bytes), 2, UInt32) === try_decode_exact(MemoryView(bytes), 2, UInt32, E)
-        @test M.try_decode_exact(MemoryView(bytes), UInt16) === DecodeError(TrailingData)
+        @test M.try_decode_exact(MemoryView(bytes), UInt16) == DecodeError(TrailingData)
         @test M.decode_exact(MemoryView(bytes)[1:2], UInt16) === decode_exact(MemoryView(bytes)[1:2], UInt16, E)
         @test M.decode_exact(MemoryView(bytes), 4, UInt16) === decode_exact(MemoryView(bytes), 4, UInt16, E)
         @test M.load_exact(CursorReader(bytes), 4, UInt32) === load_exact(CursorReader(bytes), 4, UInt32, E)
-        @test M.try_load_exact(CursorReader(bytes), 5, UInt32) === DecodeError(TrailingData)
+        @test M.try_load_exact(CursorReader(bytes), 5, UInt32) == DecodeError(TrailingData)
         a = zeros(UInt8, 4)
         b = zeros(UInt8, 4)
         @test M.encode!(MemoryView(a), 0x0102) == encode!(MemoryView(b), 0x0102, E)
@@ -230,9 +230,9 @@ end
         @test a == b
         @test M.try_encode!(MemoryView(a), 0x0506) == try_encode!(MemoryView(b), 0x0506, E)
         @test a == b
-        @test M.try_encode!(MemoryView(a), 4, 0x0708) === try_encode!(MemoryView(b), 4, 0x0708, E) === EncodeError(InsufficientSpace)
+        @test M.try_encode!(MemoryView(a), 4, 0x0708) === try_encode!(MemoryView(b), 4, 0x0708, E) == EncodeError(InsufficientSpace)
         @test M.load(CursorReader(bytes), UInt32) === load(CursorReader(bytes), UInt32, E)
-        @test M.try_load(CursorReader(bytes), UInt64) === DecodeError(Truncated)
+        @test M.try_load(CursorReader(bytes), UInt64) == DecodeError(Truncated)
         w1 = VecWriter()
         w2 = VecWriter()
         @test M.store(w1, 0x0102) == store(w2, 0x0102, E)
@@ -263,22 +263,27 @@ end
 end
 
 @testset "DecodeError" begin
-    @test isbitstype(DecodeError)
-    @test sizeof(DecodeError) == 1
+    @test DecodeError(Truncated) isa DecodeError{Nothing}
+    # The payload types of most codecs make errors that hold no references
+    @test Base.allocatedinline(DecodeError{Nothing})
+    @test Base.allocatedinline(DecodeError{ParseError})
+    @test Base.allocatedinline(DecodeError{Union{Nothing, ParseError}})
     @test DecodeError <: Exception
     for kind in (EndOfInput, Truncated, InvalidData, TrailingData)
         str = sprint(showerror, DecodeError(kind))
         @test startswith(str, "DecodeError: ")
+        @test !occursin("payload", str)
     end
 end
 
 @testset "EncodeError" begin
-    @test isbitstype(EncodeError)
-    @test sizeof(EncodeError) == 1
+    @test EncodeError(InvalidValue) isa EncodeError{Nothing}
+    @test Base.allocatedinline(EncodeError{Nothing})
     @test EncodeError <: Exception
     for kind in (InsufficientSpace, InvalidValue)
         str = sprint(showerror, EncodeError(kind))
         @test startswith(str, "EncodeError: ")
+        @test !occursin("payload", str)
     end
 end
 

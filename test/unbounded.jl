@@ -135,7 +135,7 @@ end
         @test is_err(try_decode_exact([bytes; 0xff], T, e), TrailingData)
         for k in 0:(len - 1)
             @test is_err(try_decode(bytes[1:k], T, e), k == 0 ? EndOfInput : Truncated)
-            @test try_encode!(zeros(UInt8, k), x, e) === EncodeError(InsufficientSpace)
+            @test try_encode!(zeros(UInt8, k), x, e) == EncodeError(InsufficientSpace)
             @test_throws LightBoundsError encode!(zeros(UInt8, k), x, e)
         end
         out = fill(0xee, len + 2)
@@ -185,7 +185,7 @@ end
         @test dst == xs && eof(io)
     end
     for io in readers_of(all_bytes[1:(end - 1)])
-        @test_throws DecodeError(Truncated) load_every!(io, similar(xs), e)
+        @test_error DecodeError(Truncated) load_every!(io, similar(xs), e)
     end
     for io in (VecWriter(), VecWriter(undef, 1), VecWriter(undef, 20))
         @test store_every(io, xs, e) == length(all_bytes)
@@ -202,12 +202,12 @@ end
     for io in readers_of(bytes)
         @test is_err(try_load(io, Entry, e), InvalidData)
         @test load_all!(io, Vector{Entry}(undef, 2), e) == (0, 0)
-        @test_throws DecodeError(InvalidData) load_every!(io, Vector{Entry}(undef, 1), e)
+        @test_error DecodeError(InvalidData) load_every!(io, Vector{Entry}(undef, 1), e)
         @test read(io) == bytes
     end
     io = VecWriter()
     bad = (UInt8(1), NulTerminated("a\0b"))
-    @test try_store(io, bad, e) === EncodeError(InvalidValue)
+    @test try_store(io, bad, e) == EncodeError(InvalidValue)
     @test store_all(io, [(UInt8(1), NulTerminated("a")), bad], e) == (1, 3)
     @test io.vec == [0x01, UInt8('a'), 0x00]
     # Corrupt lengths neither throw nor allocate in proportion to the length

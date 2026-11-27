@@ -22,10 +22,12 @@ end
         @test codec_scheme(T, LittleEndian()) === Manual()
     end
     native(x) = reinterpret(NTuple{sizeof(x), UInt8}, x)
-    @test is_valid_bits(Bool, (0x00,)) && is_valid_bits(Bool, (0x01,))
-    @test !is_valid_bits(Bool, (0x02,))
-    @test is_valid_bits(Fruit, native(0x0203)) && !is_valid_bits(Fruit, native(0x0204))
-    @test is_valid_bits(Signs, native(0xffff)) && !is_valid_bits(Signs, native(0xfffe))
+    @test validate_bits(Bool, (0x00,)) === validate_bits(Bool, (0x01,)) === nothing
+    @test validate_bits(Bool, (0x02,)) === Invalid()
+    @test validate_bits(Fruit, native(0x0203)) === nothing
+    @test validate_bits(Fruit, native(0x0204)) === Invalid()
+    @test validate_bits(Signs, native(0xffff)) === nothing
+    @test validate_bits(Signs, native(0xfffe)) === Invalid()
     # The trait can't be declared for types that are not bits types
     @test_throws ArgumentError max_encoded_size(Boxed, LittleEndian())
     @test_throws ArgumentError try_decode(MemoryView(zeros(UInt8, 8)), Boxed, LittleEndian())
@@ -60,7 +62,7 @@ end
             bytes = f(x)
             @test max_encoded_size(T, e) == sizeof(T)
             @test try_encode!(SCRATCH, x, e) === encode!(SCRATCH, x, e) === sizeof(T)
-            @test try_encode!(zeros(UInt8, sizeof(T) - 1), x, e) === EncodeError(InsufficientSpace)
+            @test try_encode!(zeros(UInt8, sizeof(T) - 1), x, e) == EncodeError(InsufficientSpace)
             buf = zeros(UInt8, sizeof(T) + 3)
             @test encode!(MemoryView(buf), x, e) == sizeof(T)
             @test buf[1:sizeof(T)] == bytes
@@ -72,7 +74,7 @@ end
             @test buf[2:(sizeof(T) + 1)] == bytes
             @test isequal(try_decode_n(MemoryView(buf)[2:end], T, e), (x, sizeof(T)))
             # Too short
-            @test try_encode!(MemoryView(zeros(UInt8, sizeof(T) - 1)), x, e) === EncodeError(InsufficientSpace)
+            @test try_encode!(MemoryView(zeros(UInt8, sizeof(T) - 1)), x, e) == EncodeError(InsufficientSpace)
             @test_throws LightBoundsError encode!(MemoryView(zeros(UInt8, sizeof(T) - 1)), x, e)
             @test is_err(try_decode(MemoryView(UInt8[]), T, e), EndOfInput)
             if sizeof(T) > 1
@@ -179,7 +181,7 @@ function test_odd_bits(T, le::Vector{UInt8}, value)
     @test low_bits(decode(MemoryView(buf), 2, T, BigEndian())) == value
     # Too short
     @test is_err(try_decode(MemoryView(le[1:(n - 1)]), T, LittleEndian()), n == 1 ? EndOfInput : Truncated)
-    @test try_encode!(MemoryView(zeros(UInt8, n - 1)), x, LittleEndian()) === EncodeError(InsufficientSpace)
+    @test try_encode!(MemoryView(zeros(UInt8, n - 1)), x, LittleEndian()) == EncodeError(InsufficientSpace)
     # Bulk, and loading byte by byte
     data = vcat(be, be, be[1:(n - 1)])
     dst = MemoryView(Vector{T}(undef, 3))
@@ -211,7 +213,7 @@ end
     test_odd_bits(S144, UInt8[1:17; 0x7f], reinterpret(UInt128, UInt8.(1:16))[1])
     @test is_err(try_decode(MemoryView([zeros(UInt8, 17); 0x80]), S144, LittleEndian()), InvalidData)
     @test is_err(try_decode(MemoryView([0x80; zeros(UInt8, 17)]), S144, BigEndian()), InvalidData)
-    # BitsStorable without `is_valid_bits`
+    # BitsStorable without `validate_bits`
     @test_throws MethodError try_decode(MemoryView(zeros(UInt8, 2)), NoCheck16, LittleEndian())
 end
 

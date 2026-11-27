@@ -17,13 +17,13 @@ julia> try_load(io, UInt16, LittleEndian())
 0x0201
 
 julia> try_load(io, UInt16, LittleEndian()) # nothing is consumed
-DecodeError(BitScribbling.DecodeErrorKinds.Truncated)
+DecodeError{Union{}}(BitScribbling.DecodeErrorKinds.Truncated)
 
 julia> try_load(io, UInt8, LittleEndian())
 0x03
 
 julia> try_load(io, UInt8, LittleEndian())
-DecodeError(BitScribbling.DecodeErrorKinds.EndOfInput)
+DecodeError{Union{}}(BitScribbling.DecodeErrorKinds.EndOfInput)
 ```
 
 # Extended help
@@ -53,7 +53,7 @@ The `DecodeErrorKind` in the thrown error is given by this table
 | Complete, valid encoding available            | the value; its bytes are consumed   |
 | EOF with no bytes left                        | `DecodeError(EndOfInput)`           |
 | EOF partway through an encoding               | `DecodeError(Truncated)`            |
-| Invalid encoding                              | `DecodeError(InvalidData)`          |
+| Invalid encoding                              | `DecodeError(InvalidData)`, with the payload of the codec's `Invalid` |
 
 
 """
@@ -105,7 +105,10 @@ function try_load_sized_slow(
         @? try_decode_sized(buffer, 1, T, enc)
     else
         if has_codec(T, enc) && !isempty(buffer)
-            decode_start(buffer, T, enc, false) isa Invalid && return DecodeError(InvalidData)
+            # The buffered bytes may already decide that the data is invalid. The error
+            # has the payload of the codec, and the error type of T.
+            start = decode_start(buffer, T, enc, false)
+            start isa Invalid && return decode_error(T, enc, start)
         end
         return load_slow(io, T, enc)
     end
@@ -149,12 +152,12 @@ function peek_value(
     )::Union{Tuple{T, Int}, DecodeError} where {T}
     # Measurably faster than calling `get_nonempty_buffer` also when bytes are buffered
     if isempty(get_buffer(io)::ImmutableMemoryView{UInt8})
-        get_nonempty_buffer(io) === nothing && return DecodeError(EndOfInput)
+        get_nonempty_buffer(io) === nothing && return decode_error(T, enc, EndOfInput)
     end
     input = ReaderInput(io, 0, typemax(Int))
     result = decode_reader(input, T, enc, max_encoded_size(T, enc))
-    result isa TooShort && return DecodeError(Truncated)
-    result isa Invalid && return DecodeError(InvalidData)
+    result isa TooShort && return decode_error(T, enc, Truncated)
+    result isa Invalid && return decode_error(T, enc, result)
     return result
 end
 
@@ -230,13 +233,13 @@ julia> try_load_exact(io, 2, Char, UTF8())
 'é': Unicode U+00E9 (category Ll: Letter, lowercase)
 
 julia> try_load_exact(io, 2, Char, UTF8()) # 'a' is followed by 'b'
-DecodeError(BitScribbling.DecodeErrorKinds.TrailingData)
+DecodeError{Union{}}(BitScribbling.DecodeErrorKinds.TrailingData)
 
 julia> try_load_exact(io, 1, Char, UTF8()) # nothing was consumed
 'a': ASCII/Unicode U+0061 (category Ll: Letter, lowercase)
 
 julia> try_load_exact(io, 2, Char, UTF8())
-DecodeError(BitScribbling.DecodeErrorKinds.Truncated)
+DecodeError{Union{}}(BitScribbling.DecodeErrorKinds.Truncated)
 ```
 """
 @inline function try_load_exact(
@@ -248,7 +251,7 @@ DecodeError(BitScribbling.DecodeErrorKinds.Truncated)
     if length(buffer) < nbytes
         buffer = @noinline buffer_value(io, nbytes)
         # `buffer_value` returns fewer bytes only at EOF
-        length(buffer) < nbytes && return DecodeError(isempty(buffer) ? EndOfInput : Truncated)
+        length(buffer) < nbytes && return decode_error(T, enc, isempty(buffer) ? EndOfInput : Truncated)
     end
     x = @? try_decode_exact((@inbounds buffer[1:nbytes]), T, enc)
     @inbounds consume(io, nbytes)
@@ -370,11 +373,11 @@ julia> io.vec
 end
 
 # `try_store` of unbounded types. Encode into the buffer, and grow it until there is room.
-@noinline function store_unbounded(io::AbstractBufWriter, x, enc::Encoding)::Union{Int, EncodeError}
+@noinline function store_unbounded(io::AbstractBufWriter, x::T, enc::Encoding)::Union{Int, EncodeError} where {T}
     buffer = get_buffer(io)::MutableMemoryView{UInt8}
     while true
         result = encode_short(buffer, x, enc)
-        result isa Invalid && return EncodeError(InvalidValue)
+        result isa Invalid && return encode_error(T, enc, result)
         if result isa Int
             @inbounds consume(io, result)
             return result

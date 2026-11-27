@@ -54,12 +54,12 @@
     @test decode(MemoryView([0x01, 0x02]), Narrow, e) === Narrow(0x0102)
     @test encoding(NestNarrow(Narrow(0x0102)), e) == [0x01, 0x02]
     for bad in (Narrow(-1), NestNarrow(Narrow(65536)), (0x01, Narrow(-1)))
-        @test try_encode!(MemoryView(zeros(UInt8, 8)), bad, e) === EncodeError(InvalidValue)
-        @test try_encode!(MemoryView(zeros(UInt8, 3)), bad, e) === EncodeError(InvalidValue)
-        @test_throws EncodeError(InvalidValue) encode!(MemoryView(zeros(UInt8, 8)), bad, e)
+        @test try_encode!(MemoryView(zeros(UInt8, 8)), bad, e) == EncodeError(InvalidValue)
+        @test try_encode!(MemoryView(zeros(UInt8, 3)), bad, e) == EncodeError(InvalidValue)
+        @test_error EncodeError(InvalidValue) encode!(MemoryView(zeros(UInt8, 8)), bad, e)
         io = VecWriter()
-        @test try_store(io, bad, e) === EncodeError(InvalidValue)
-        @test_throws EncodeError(InvalidValue) store(io, bad, e)
+        @test try_store(io, bad, e) == EncodeError(InvalidValue)
+        @test_error EncodeError(InvalidValue) store(io, bad, e)
         @test isempty(io.vec)
     end
     narrows = [Narrow(1), Narrow(2), Narrow(-1), Narrow(3)]

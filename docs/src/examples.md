@@ -168,7 +168,7 @@ Point2D(0.0, 0.0)
 This type has no padding, and its encoding is the same as its constituent bytes.
 However, not all bit patterns are valid.
 That means it can be read and written via pointer ops, but read instances must be validated.
-We can do that by opting into the `BitsStorable` trait, and implementing the validation function `is_valid_bits`:
+We can do that by opting into the `BitsStorable` trait, and implementing the validation function `validate_bits`, which returns `nothing` for valid bytes, and `Invalid()` otherwise:
 
 ```jldoctest
 using BitScribbling.Little
@@ -184,11 +184,11 @@ function BitScribbling.codec_scheme(::Type{EvenInteger}, ::BitScribbling.Endiann
     BitScribbling.BitsStorable()
 end
 
-function BitScribbling.is_valid_bits(::Type{EvenInteger}, bytes::NTuple{8, UInt8})
+function BitScribbling.validate_bits(::Type{EvenInteger}, bytes::NTuple{8, UInt8})
     # Validate the bytes are those of an even integer. Here, I choose to use
     # the helper function as_unsigned
     u64 = BitScribbling.as_unsigned(bytes)
-    iseven(u64)
+    iseven(u64) ? nothing : BitScribbling.Invalid()
 end
 
 # Now all writer and reader functions work for big endian and little endian
@@ -324,17 +324,26 @@ encode!(mem, 0x0123abcf, LowerCaseHexadecimal())
 ("0123abcf", 0x0123abcf)
 ```
 
-### Custom struct 5: Manual codec, variable length
+### Custom struct 5: Manual codec, variable length, with error payloads
 Here, I write `UInt32` in *decimal* and *without* left padding with zeros.
 This adds two more complications compared to the example above:
 * When decoding, the length can be arbitrarily long, since there can be any number of leading zeros
 * Even when encoding, the output length is variable.
 
+Decoding can fail for two reasons: the number may not fit in a `UInt32`, or there may be no digits.
+The codec tells them apart with the payload of the `Invalid` it returns, so that a caller
+can e.g. try again with a wider integer type. The type of the payloads is declared with
+`codec_decode_invalid_type`, and the payload of the `DecodeError` is `Some(Overflow)` or `Some(NoDigits)`.
+
 ```jldoctest
-using BitScribbling: BitScribbling, Encoding, load, store, @?
+using BitScribbling: BitScribbling, Encoding, DecodeError, load, store, try_load, @?
 using BufferIO: CursorReader, VecWriter
 
 struct ASCIIDecimal <: Encoding end
+
+@enum ParseError::UInt8 NoDigits Overflow
+
+BitScribbling.codec_decode_invalid_type(::Type{UInt32}, ::ASCIIDecimal) = ParseError
 
 function BitScribbling.codec_max_encoded_size(::Type{UInt32}, ::ASCIIDecimal)
     # If the encoding had disallowed leading zeros, this could have been
@@ -358,11 +367,10 @@ function BitScribbling.codec_try_decode(
         # Stop at the end of the input, or the first byte that isn't a digit
         (byte !== nothing && in(byte, 0x30:0x39)) || break
         value = value * 10 + (byte - 0x30)
-        value > typemax(UInt32) && return BitScribbling.Invalid()
+        value > typemax(UInt32) && return BitScribbling.Invalid(Overflow)
         n_bytes_read += 1
     end
-    # No digits
-    iszero(n_bytes_read) && return BitScribbling.Invalid()
+    iszero(n_bytes_read) && return BitScribbling.Invalid(NoDigits)
     return (value % UInt32, n_bytes_read)
 end
 
@@ -384,10 +392,11 @@ end
 wtr = VecWriter()
 store(wtr, UInt32(123), ASCIIDecimal())
 rdr = CursorReader("00456 ")
-(String(wtr.vec), load(rdr, UInt32, ASCIIDecimal()))
+err = try_load(CursorReader("4294967296"), UInt32, ASCIIDecimal())
+(String(wtr.vec), load(rdr, UInt32, ASCIIDecimal()), err.payload)
 
 # output
 
-("123", 0x000001c8)
+("123", 0x000001c8, Some(Overflow))
 ```
 

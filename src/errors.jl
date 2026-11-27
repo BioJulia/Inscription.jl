@@ -62,10 +62,33 @@ end
 using .DecodeErrorKinds: DecodeErrorKind, EndOfInput, Truncated, InvalidData, TrailingData
 
 """
-    DecodeError <: Exception
+    DecodeError{P} <: Exception
+    DecodeError(kind::DecodeErrorKind)
+    DecodeError(kind::DecodeErrorKind, payload::Some)
+    DecodeError{P}(kind::DecodeErrorKind, [payload::Union{Nothing, Some}])
 
-A failure to decode or load a value, caused by the data. It has the public property
-`.kind::DecodeErrorKind`.
+A failure to decode or load a value, caused by the data. It has the public properties
+`.kind::DecodeErrorKind` and `.payload::Union{Nothing, Some{P}}`.
+
+The payload is `Some(x)` exactly when the kind is `InvalidData`, where `x::P` is the
+payload of the [`Invalid`](@ref) that the codec returned, and `nothing` for the other
+kinds. It tells why the data is invalid: for example, `Some(Overflow)` from a codec that
+parses integers. When the codec gave no reason, by returning `Invalid()`, it is
+`Some(nothing)`.
+
+When decoding a `T` with the encoding `enc`, `P` is
+[`decode_invalid_type(T, enc)`](@ref decode_invalid_type), whatever the kind. So functions
+such as [`try_load`](@ref) return a union of only two types. For types that can't be
+invalid, such as `UInt32` with `LittleEndian`, `P` is `Union{}`.
+
+`DecodeError(kind)` is a `DecodeError{Nothing}`, whose payload is `Some(nothing)` if the
+kind is `InvalidData`, else `nothing`. `DecodeError{P}(kind)` is the same, with the type
+`P`. Constructing an error whose payload is not `Some` exactly when the kind is
+`InvalidData` throws an `ArgumentError`.
+
+Two `DecodeError`s are `==` if their kinds and payloads are, whatever their types. So
+`err == DecodeError(EndOfInput)` tells if an error of any type is a clean end of input,
+and `err.payload == Some(Overflow)` if the data is invalid because of an overflow.
 
 Functions prefixed with `try_` return a `DecodeError` instead of throwing it.
 The functions without the prefix throw the same value.
@@ -91,9 +114,29 @@ julia> while true
 Error: Truncated
 ```
 """
-struct DecodeError <: Exception
+struct DecodeError{P} <: Exception
     kind::DecodeErrorKind
+    payload::Union{Nothing, Some{P}}
+
+    function DecodeError{P}(kind::DecodeErrorKind, payload::Union{Nothing, Some}) where {P}
+        (payload isa Some) === (kind === InvalidData) || throw_payload_kind_error(kind, InvalidData, payload)
+        return new{P}(kind, payload)
+    end
 end
+
+function DecodeError{P}(kind::DecodeErrorKind) where {P}
+    return DecodeError{P}(kind, kind === InvalidData ? Some{P}(nothing) : nothing)
+end
+
+DecodeError(kind::DecodeErrorKind) = DecodeError{Nothing}(kind)
+DecodeError(kind::DecodeErrorKind, payload::Some{P}) where {P} = DecodeError{P}(kind, payload)
+
+Base.show(io::IO, err::DecodeError{P}) where {P} = show_error(io, err, DecodeError, P)
+
+# Errors are equal if their kinds and payloads are, whatever their payload types. So
+# `err == DecodeError(EndOfInput)` holds for errors of any type that are at the end of input.
+Base.:(==)(a::DecodeError, b::DecodeError) = a.kind === b.kind && isequal(a.payload, b.payload)
+Base.hash(x::DecodeError, h::UInt) = hash(x.payload, hash(x.kind, hash(DecodeError, h)))
 
 function Base.showerror(io::IO, err::DecodeError)
     kind = err.kind
@@ -109,7 +152,44 @@ function Base.showerror(io::IO, err::DecodeError)
         "Unknown decoding error"
     end
     print(io, "DecodeError: ", str)
+    show_payload(io, err.payload)
     return nothing
+end
+
+# Show the error `err` of the type `name{P}` as the call that constructs it. If its
+# payload follows from its kind, the payload is left out: then the error is
+# `name(kind)` if `P` is `Nothing`, else `name{P}(kind)`.
+function show_error(io::IO, err, name::UnionAll, P::Type)
+    payload = err.payload
+    implied = payload === nothing || something(payload) === nothing
+    show(io, implied && P === Nothing ? name : typeof(err))
+    print(io, '(')
+    show(io, err.kind)
+    if !implied
+        print(io, ", ")
+        show(io, payload)
+    end
+    print(io, ')')
+    return nothing
+end
+
+# Show the payload in `showerror`, unless it is `nothing` or `Some(nothing)`, which
+# give no reason
+function show_payload(io::IO, payload::Union{Nothing, Some})
+    (payload === nothing || something(payload) === nothing) && return nothing
+    print(io, " (payload: ")
+    show(io, something(payload))
+    print(io, ')')
+    return nothing
+end
+
+@noinline function throw_payload_kind_error(kind, invalid_kind, payload)
+    throw(
+        ArgumentError(
+            "the payload of an error must be `Some` exactly when its kind is `$invalid_kind`, " *
+                "but the kind is `$kind`, and the payload is `$(repr(payload))`"
+        )
+    )
 end
 
 """
@@ -158,10 +238,23 @@ end
 using .EncodeErrorKinds: EncodeErrorKind, InsufficientSpace, InvalidValue
 
 """
-    EncodeError <: Exception
+    EncodeError{P} <: Exception
+    EncodeError(kind::EncodeErrorKind)
+    EncodeError(kind::EncodeErrorKind, payload::Some)
+    EncodeError{P}(kind::EncodeErrorKind, [payload::Union{Nothing, Some}])
 
-A failure to encode or store a value. It has the public property
-`.kind::EncodeErrorKind`.
+A failure to encode or store a value. It has the public properties
+`.kind::EncodeErrorKind` and `.payload::Union{Nothing, Some{P}}`.
+
+As for [`DecodeError`](@ref), the payload is `Some(x)` exactly when the kind is
+`InvalidValue`, where `x::P` is the payload of the [`Invalid`](@ref) that the codec
+returned, and `Some(nothing)` for `Invalid()`. It is `nothing` for `InsufficientSpace`.
+
+When encoding a `T` with the encoding `enc`, `P` is
+[`encode_invalid_type(T, enc)`](@ref encode_invalid_type), whatever the kind. For types that
+can always be encoded, such as bits types, it is `Union{}`. `EncodeError(kind)` is an
+`EncodeError{Nothing}`, whose payload is `Some(nothing)` if the kind is `InvalidValue`.
+As for `DecodeError`, errors are `==` if their kinds and payloads are.
 
 Functions prefixed with `try_` return an `EncodeError` instead of throwing it:
 * [`try_encode!`](@ref) returns either kind.
@@ -178,12 +271,31 @@ See also: [`EncodeErrorKinds.EncodeErrorKind`](@ref), [`@?`](@ref)
 # Examples
 ```jldoctest
 julia> try_encode!(MemoryView(zeros(UInt8, 3)), 0x01020304, BigEndian())
-EncodeError(BitScribbling.EncodeErrorKinds.InsufficientSpace)
+EncodeError{Union{}}(BitScribbling.EncodeErrorKinds.InsufficientSpace)
 ```
 """
-struct EncodeError <: Exception
+struct EncodeError{P} <: Exception
     kind::EncodeErrorKind
+    payload::Union{Nothing, Some{P}}
+
+    function EncodeError{P}(kind::EncodeErrorKind, payload::Union{Nothing, Some}) where {P}
+        (payload isa Some) === (kind === InvalidValue) || throw_payload_kind_error(kind, InvalidValue, payload)
+        return new{P}(kind, payload)
+    end
 end
+
+function EncodeError{P}(kind::EncodeErrorKind) where {P}
+    return EncodeError{P}(kind, kind === InvalidValue ? Some{P}(nothing) : nothing)
+end
+
+EncodeError(kind::EncodeErrorKind) = EncodeError{Nothing}(kind)
+EncodeError(kind::EncodeErrorKind, payload::Some{P}) where {P} = EncodeError{P}(kind, payload)
+
+Base.show(io::IO, err::EncodeError{P}) where {P} = show_error(io, err, EncodeError, P)
+
+# As for `DecodeError`
+Base.:(==)(a::EncodeError, b::EncodeError) = a.kind === b.kind && isequal(a.payload, b.payload)
+Base.hash(x::EncodeError, h::UInt) = hash(x.payload, hash(x.kind, hash(EncodeError, h)))
 
 function Base.showerror(io::IO, err::EncodeError)
     kind = err.kind
@@ -195,6 +307,7 @@ function Base.showerror(io::IO, err::EncodeError)
         "Unknown encoding error"
     end
     print(io, "EncodeError: ", str)
+    show_payload(io, err.payload)
     return nothing
 end
 
@@ -221,14 +334,57 @@ end
 TooShort() = TooShort(0)
 
 """
+    Invalid{P}(payload::P)
+    Invalid(payload)
     Invalid()
 
 Returned by a codec when the input is not a valid encoding, or when the value can't be
-encoded.
+encoded. `Invalid()` is `Invalid(nothing)`, an `Invalid{Nothing}`.
+
+The payload tells why. It becomes the payload of the [`DecodeError`](@ref) of kind
+`InvalidData`, or the [`EncodeError`](@ref) of kind `InvalidValue`, that the functions
+which use the codec return. For example, a codec that parses decimal integers may return
+`Invalid(Overflow)`, where `Overflow` is a value of an enum, so that its caller can try
+again with a wider integer type.
+
+Its type must be declared: every `Invalid` that the codec of a type `T` with an encoding
+`E` returns must be an `Invalid{Q}`, where `Q` is a subtype of the payload type
+[`codec_decode_invalid_type(T, E())`](@ref codec_decode_invalid_type) when decoding, or
+[`codec_encode_invalid_type(T, E())`](@ref codec_encode_invalid_type) when encoding.
+Otherwise, an `ErrorException` is thrown. Both default to `Nothing`, so a codec that is
+not declared to have payloads returns `Invalid()`. A codec that declares a payload type
+can only return `Invalid()` if the type includes `Nothing`, e.g. `Union{Nothing, MyError}`.
+
+The `Invalid` is converted to the declared type, so a codec whose payload type is a union,
+e.g. `Union{Nothing, MyError}`, may return both `Invalid()` and `Invalid(MyError(...))`.
+But it is faster to construct the declared type, e.g.
+`Invalid{Union{Nothing, MyError}}(nothing)`: if a codec returns `Invalid`s of different
+types, its result type is a union of too many types for the compiler to keep it
+concrete, so the errors are slower to return.
+
+Payloads should be `isbits`, so that errors can be returned without allocating.
 
 See also: [`TooShort`](@ref)
 """
-struct Invalid end
+struct Invalid{P}
+    payload::P
+end
+
+Invalid() = Invalid(nothing)
+
+# Shown as the call that constructs it, `Invalid()` if it is that
+function Base.show(io::IO, x::Invalid{P}) where {P}
+    if P === Nothing
+        show(io, Invalid)
+        print(io, "()")
+    else
+        show(io, typeof(x))
+        print(io, '(')
+        show(io, x.payload)
+        print(io, ')')
+    end
+    return nothing
+end
 
 """
     @? expr
@@ -257,7 +413,7 @@ julia> load_pair(BufferIO.CursorReader([0x00, 0x01, 0x00, 0x02]))
 (0x0001, 0x0002)
 
 julia> load_pair(BufferIO.CursorReader([0x00, 0x01, 0x00]))
-DecodeError(BitScribbling.DecodeErrorKinds.Truncated)
+DecodeError{Union{}}(BitScribbling.DecodeErrorKinds.Truncated)
 ```
 """
 macro var"?"(expr)
@@ -266,6 +422,27 @@ macro var"?"(expr)
         result isa Union{DecodeError, EncodeError, TooShort, Invalid} && return result
         result
     end
+end
+
+# The errors of decoding or encoding a T with `enc`, as a `DecodeError` or `EncodeError`
+# of the same concrete type for every kind, see `decode_invalid_type`. The kinds passed
+# alone are never `InvalidData` or `InvalidValue`, which have the payload of an `Invalid`.
+@inline function decode_error(::Type{T}, enc::Encoding, kind::DecodeErrorKind) where {T}
+    return DecodeError{decode_invalid_type(T, enc)}(kind, nothing)
+end
+
+@inline function decode_error(::Type{T}, enc::Encoding, x::Invalid) where {T}
+    P = decode_invalid_type(T, enc)
+    return DecodeError{P}(InvalidData, Some{P}(x.payload))
+end
+
+@inline function encode_error(::Type{T}, enc::Encoding, kind::EncodeErrorKind) where {T}
+    return EncodeError{encode_invalid_type(T, enc)}(kind, nothing)
+end
+
+@inline function encode_error(::Type{T}, enc::Encoding, x::Invalid) where {T}
+    P = encode_invalid_type(T, enc)
+    return EncodeError{P}(InvalidValue, Some{P}(x.payload))
 end
 
 # Throw `e`. Outlined, because throwing boxes the isbits error, which would otherwise be

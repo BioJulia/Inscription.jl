@@ -78,11 +78,11 @@ end
         # Too few bytes to decode, or room to encode
         dst = Vector{T}(undef, 4)
         src = MemoryView(bytes)[2:(1 + 3 * sizeof(T))]
-        @test_throws DecodeError(EndOfInput) decode_every!(MemoryView(dst), src, e)
+        @test_error DecodeError(EndOfInput) decode_every!(MemoryView(dst), src, e)
         @test isequal(dst[1:3], values[1:3])
         if sizeof(T) > 1
             src = MemoryView(bytes)[2:(3 * sizeof(T))]
-            @test_throws DecodeError(Truncated) decode_every!(MemoryView(dst), src, e)
+            @test_error DecodeError(Truncated) decode_every!(MemoryView(dst), src, e)
         end
         out = zeros(UInt8, 4 * sizeof(T) - 1)
         @test_throws LightBoundsError encode_every!(MemoryView(out), MemoryView(values[1:4]), e)
@@ -91,7 +91,7 @@ end
 
     # Invalid data
     dst = zeros(Bool, 3)
-    @test_throws DecodeError(InvalidData) decode_every!(MemoryView(dst), MemoryView([0x01, 0x00, 0x02, 0x01]), LittleEndian())
+    @test_error DecodeError(InvalidData) decode_every!(MemoryView(dst), MemoryView([0x01, 0x00, 0x02, 0x01]), LittleEndian())
     @test dst[1:2] == [true, false]
 
     # Variable-length encodings
@@ -103,7 +103,7 @@ end
     @test encode_every!(MemoryView(out), MemoryView(collect(s)), UTF8()) == ncodeunits(s)
     @test out[1:ncodeunits(s)] == codeunits(s)
     # Ends between two characters
-    @test_throws DecodeError(EndOfInput) decode_every!(MemoryView(Vector{Char}(undef, 4)), MemoryView(codeunits(s)[1:6]), UTF8())
+    @test_error DecodeError(EndOfInput) decode_every!(MemoryView(Vector{Char}(undef, 4)), MemoryView(codeunits(s)[1:6]), UTF8())
     # No room for the 4 bytes of 😀. The error reports the index where it starts.
     err = try
         encode_every!(MemoryView(zeros(UInt8, 8)), MemoryView(collect(s)), UTF8())
@@ -212,21 +212,21 @@ end
     @test length(get_buffer(io)) == 1
 
     # No bytes at all
-    @test_throws DecodeError(EndOfInput) load_every!(CursorReader(UInt8[]), MemoryView(zeros(UInt16, 2)), LittleEndian())
+    @test_error DecodeError(EndOfInput) load_every!(CursorReader(UInt8[]), MemoryView(zeros(UInt16, 2)), LittleEndian())
     # Ends between two elements, after some were loaded
     io = CursorReader([0x01, 0x00])
     dst = zeros(UInt16, 2)
-    @test_throws DecodeError(EndOfInput) load_every!(io, MemoryView(dst), LittleEndian())
+    @test_error DecodeError(EndOfInput) load_every!(io, MemoryView(dst), LittleEndian())
     @test dst[1] == 0x0001
     @test isempty(get_buffer(io))
     # Ends partway through an element, which is not consumed
     io = CursorReader([0x01, 0x00, 0x02])
-    @test_throws DecodeError(Truncated) load_every!(io, MemoryView(zeros(UInt16, 2)), LittleEndian())
+    @test_error DecodeError(Truncated) load_every!(io, MemoryView(zeros(UInt16, 2)), LittleEndian())
     @test length(get_buffer(io)) == 1
     # An invalid element, which is not consumed
     io = CursorReader([0x01, 0x00, 0x05, 0x01])
     dst = zeros(Bool, 4)
-    @test_throws DecodeError(InvalidData) load_every!(io, MemoryView(dst), BigEndian())
+    @test_error DecodeError(InvalidData) load_every!(io, MemoryView(dst), BigEndian())
     @test dst[1:2] == [true, false]
     @test length(get_buffer(io)) == 2
     # Too-small capacity

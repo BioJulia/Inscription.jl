@@ -22,6 +22,14 @@ See their docstrings for details (click them to go to their docstring in this do
 * [`BitScribbling.codec_try_decode`](@ref) attempts to decode an instance of `T` from a [`BitScribbling.DecodeInput`](@ref).
 * [`BitScribbling.codec_try_encode!`](@ref) attempts to encode an instance of `T` into an [`BitScribbling.EncodeOutput`](@ref).
 
+When the bytes are not a valid encoding, `codec_try_decode` returns an [`Invalid`](@ref BitScribbling.Invalid), and
+when a value can't be encoded, `codec_try_encode!` does. Its payload may say why, e.g.
+`Invalid(Overflow)`, and is passed on in the [`DecodeError`](@ref) or [`EncodeError`](@ref)
+that the user gets. The payload types are declared with [`BitScribbling.codec_decode_invalid_type`](@ref) and
+[`BitScribbling.codec_encode_invalid_type`](@ref). They default to `Nothing`, so a codec without
+payloads returns `Invalid()`. Like `codec_try_decode` and `codec_try_encode!`, the first is
+only used for decoding, and the second only for encoding.
+
 `codec_try_decode` reads its input through [`BitScribbling.require_bytes`](@ref), [`BitScribbling.peek_byte`](@ref) and [`BitScribbling.decode_field`](@ref), and `codec_try_encode!` writes its output through [`BitScribbling.reserve_bytes`](@ref) and [`BitScribbling.encode_field`](@ref). When loading from an `AbstractBufReader`, these make the reader wait for exactly the bytes the codec reads, so a codec for a variable-length encoding, like `Char`'s `UTF8` encoding, doesn't make loading wait for the maximal number of bytes of any instance of `T`. When the input is known to hold the maximal number of bytes, as it usually is, the checks of these functions for constant sizes are compiled away. Code only against the abstract `DecodeInput` and `EncodeOutput`: a codec is compiled for several internal input and output types, and must not depend on which one it gets. In particular, its input may not have all bytes available yet. Reads may make more bytes available, which may invalidate views from earlier reads, and the codec may be run again on the same bytes. See [`BitScribbling.DecodeInput`](@ref).
 
 ## Deriving codecs automatically
@@ -51,9 +59,10 @@ A type that can be converted to and from another type `P` with a codec can be en
 with any encoding that `P` has a codec for, by declaring `codec_scheme` to be `Proxy{P}()`.
 Then, implement [`BitScribbling.try_to_proxy`](@ref BitScribbling.try_to_proxy), which is needed for encoding, and [`BitScribbling.try_from_proxy`](@ref BitScribbling.try_from_proxy), which is needed for decoding.
 A type that is only encoded, or only decoded, only needs the one method.
-Both may return [`Invalid()`](@ref BitScribbling.Invalid): `try_to_proxy` if the value can't be represented by the proxy,
+Both may return an [`Invalid`](@ref BitScribbling.Invalid): `try_to_proxy` if the value can't be represented by the proxy,
 which makes encoding fail with `InvalidValue`, and `try_from_proxy` if the proxy is not a valid value,
-which makes decoding fail with `InvalidData`.
+which makes decoding fail with `InvalidData`. The errors of decoding and encoding the proxy are passed on,
+so the payloads of a proxied type are those of `try_to_proxy` or `try_from_proxy`, and those of the proxy.
 
 For example, this struct has padding in memory, so it can't be `BitsLoadable`, but it can be encoded
 as a tuple, which has no padding in its encoding:

@@ -9,6 +9,21 @@ bytes_be(x) = collect(reinterpret(UInt8, [hton(x)]))
 
 is_err(x, kind) = x isa DecodeError && x.kind === kind
 
+# Like `@test_throws err expr`, but compares the error with `==`, which ignores the type
+# of the payloads of a `DecodeError` or `EncodeError`, so `DecodeError(EndOfInput)` is
+# the error of any type
+macro test_error(err, expr)
+    return :(@test thrown_error(() -> $(esc(expr))) == $(esc(err)))
+end
+
+thrown_error(f) =
+try
+    f()
+    nothing
+catch e
+    e
+end
+
 # Scratch memory to encode into, long enough for any value in these tests
 const SCRATCH = MemoryView(zeros(UInt8, 64))
 
@@ -36,15 +51,15 @@ BitScribbling.codec_scheme(::Type{U144}, ::Endianness) = BitsLoadable()
 # The top bit must be zero
 primitive type S24 24 end
 BitScribbling.codec_scheme(::Type{S24}, ::Endianness) = BitsStorable()
-BitScribbling.is_valid_bits(::Type{S24}, bytes::NTuple{3, UInt8}) = as_unsigned(bytes) < 0x00800000
+BitScribbling.validate_bits(::Type{S24}, bytes::NTuple{3, UInt8}) = as_unsigned(bytes) < 0x00800000 ? nothing : Invalid()
 # Wider than the largest unsigned integer. The top bit must be zero.
 primitive type S144 144 end
 BitScribbling.codec_scheme(::Type{S144}, ::Endianness) = BitsStorable()
-function BitScribbling.is_valid_bits(::Type{S144}, bytes::NTuple{18, UInt8})
+function BitScribbling.validate_bits(::Type{S144}, bytes::NTuple{18, UInt8})
     top = NATIVE_ENDIAN === LittleEndian() ? bytes[18] : bytes[1]
-    return top < 0x80
+    return top < 0x80 ? nothing : Invalid()
 end
-# BitsStorable, but doesn't implement `is_valid_bits`
+# BitsStorable, but doesn't implement `validate_bits`
 primitive type NoCheck16 16 end
 BitScribbling.codec_scheme(::Type{NoCheck16}, ::Endianness) = BitsStorable()
 
@@ -81,7 +96,7 @@ if HAS_NARROW
         BitScribbling.codec_scheme(::Type{U30}, ::Endianness) = BitsLoadable()
         primitive type S12 12 end
         BitScribbling.codec_scheme(::Type{S12}, ::Endianness) = BitsStorable()
-        BitScribbling.is_valid_bits(::Type{S12}, bytes::NTuple{2, UInt8}) = true
+        BitScribbling.validate_bits(::Type{S12}, bytes::NTuple{2, UInt8}) = nothing
 
         # The design's example of a hand-written codec for a narrow type
         primitive type U29 29 end
@@ -282,16 +297,16 @@ struct Flagged
     fruit::Fruit
 end
 BitScribbling.codec_scheme(::Type{Flagged}, ::Endianness) = BitsStorable()
-function BitScribbling.is_valid_bits(::Type{Flagged}, bytes::NTuple{4, UInt8})
+function BitScribbling.validate_bits(::Type{Flagged}, bytes::NTuple{4, UInt8})
     x = reinterpret(Flagged, bytes)
-    return x.on || x.fruit === apple
+    return x.on || x.fruit === apple ? nothing : Invalid()
 end
 struct Outer
     a::Flagged
     b::Flagged
 end
 BitScribbling.codec_scheme(::Type{Outer}, ::Endianness) = BitsStorable()
-BitScribbling.is_valid_bits(::Type{Outer}, ::NTuple{8, UInt8}) = true
+BitScribbling.validate_bits(::Type{Outer}, ::NTuple{8, UInt8}) = nothing
 # Types of size zero are rejected, also as fields
 struct Empty end
 BitScribbling.codec_scheme(::Type{Empty}, ::Endianness) = BitsLoadable()
@@ -542,6 +557,160 @@ function BufferIO.consume(x::StallingReader, n::Int)
 end
 Base.close(::StallingReader) = nothing
 
+# Codecs whose `Invalid`s have payloads
+@enum ParseError::UInt8 NoDigits Overflow
+@enum Level::UInt8 low high
+@enum TaggedError::UInt8 Untagged
+@enum RangeError::UInt8 OutOfRange
+struct EvenBits
+    raw::UInt16
+end
+struct NotAscii
+    c::Char
+end
+
+# Up to `ndigits(typemax(T))` decimal digits of an unsigned integer. A codec that fails
+# for several reasons, which its payloads tell apart.
+struct Digits <: Encoding end
+const DIGIT_TYPES = Union{UInt8, UInt16}
+# The sizes are literals, since `ndigits` is not constant-folded
+max_digits(::Type{UInt8}) = 3
+max_digits(::Type{UInt16}) = 5
+BitScribbling.codec_max_encoded_size(::Type{T}, ::Digits) where {T <: DIGIT_TYPES} = Val(max_digits(T))
+BitScribbling.codec_decode_invalid_type(::Type{<:DIGIT_TYPES}, ::Digits) = ParseError
+function BitScribbling.codec_try_decode(input::DecodeInput, ::Type{T}, ::Digits) where {T <: DIGIT_TYPES}
+    value = 0
+    n = 0
+    while n < max_digits(T)
+        byte = @? peek_byte(input, n + 1)
+        (byte === nothing || !(UInt8('0') ≤ byte ≤ UInt8('9'))) && break
+        value = 10 * value + (byte - UInt8('0'))
+        n += 1
+    end
+    n == 0 && return Invalid(NoDigits)
+    value > typemax(T) && return Invalid(Overflow)
+    return (T(value), n)
+end
+function BitScribbling.codec_try_encode!(output::EncodeOutput, x::DIGIT_TYPES, ::Digits)
+    s = string(x)
+    mem = @? reserve_bytes(output, ncodeunits(s))
+    copyto!(mem, codeunits(s))
+    return ncodeunits(s)
+end
+
+# Two numbers, separated by a comma. It passes on the payloads of the numbers, and has
+# none for a missing comma.
+struct DigitPair
+    a::UInt8
+    b::UInt8
+end
+BitScribbling.codec_max_encoded_size(::Type{DigitPair}, ::Digits) = Val(7)
+BitScribbling.codec_decode_invalid_type(::Type{DigitPair}, ::Digits) = Union{Nothing, ParseError}
+function BitScribbling.codec_try_decode(input::DecodeInput, ::Type{DigitPair}, e::Digits)
+    (a, n, input) = @? decode_field(input, UInt8, e)
+    (@? peek_byte(input, 1)) === UInt8(',') || return Invalid{Union{Nothing, ParseError}}(nothing)
+    (_, _, input) = @? decode_field(input, UInt8, LittleEndian())
+    (b, m, _) = @? decode_field(input, UInt8, e)
+    return (DigitPair(a, b), n + 1 + m)
+end
+function BitScribbling.codec_try_encode!(output::EncodeOutput, x::DigitPair, e::Digits)
+    (n, output) = @? encode_field(output, x.a, e)
+    (_, output) = @? encode_field(output, UInt8(','), LittleEndian())
+    (m, _) = @? encode_field(output, x.b, e)
+    return n + 1 + m
+end
+
+# ASCII characters, with different payload types for decoding and encoding
+struct Ascii <: Encoding end
+BitScribbling.codec_max_encoded_size(::Type{Char}, ::Ascii) = Val(1)
+BitScribbling.codec_decode_invalid_type(::Type{Char}, ::Ascii) = UInt8
+BitScribbling.codec_encode_invalid_type(::Type{Char}, ::Ascii) = NotAscii
+function BitScribbling.codec_try_decode(input::DecodeInput, ::Type{Char}, ::Ascii)
+    b = (@? require_bytes(input, 1))[1]
+    b < 0x80 || return Invalid(b)
+    return (Char(b), 1)
+end
+function BitScribbling.codec_try_encode!(output::EncodeOutput, c::Char, ::Ascii)
+    isascii(c) || return Invalid(NotAscii(c))
+    mem = @? reserve_bytes(output, 1)
+    mem[1] = codepoint(c) % UInt8
+    return 1
+end
+
+# A bits type whose low bit must be set
+primitive type Odd16 16 end
+Odd16(x::UInt16) = reinterpret(Odd16, x)
+BitScribbling.codec_scheme(::Type{Odd16}, ::Endianness) = BitsStorable()
+BitScribbling.codec_decode_invalid_type(::Type{Odd16}, ::Endianness) = EvenBits
+function BitScribbling.validate_bits(::Type{Odd16}, bytes::NTuple{2, UInt8})
+    raw = as_unsigned(bytes)
+    return isodd(raw) ? nothing : Invalid(EvenBits(raw))
+end
+# A struct of bits types, which passes on the payloads of its fields. It must be `high`
+# if `flag` is set.
+struct Tagged
+    v::Odd16
+    flag::Bool
+    level::Level
+end
+BitScribbling.codec_scheme(::Type{Tagged}, ::Endianness) = BitsStorable()
+BitScribbling.codec_decode_invalid_type(::Type{Tagged}, ::Endianness) = TaggedError
+function BitScribbling.validate_bits(::Type{Tagged}, bytes::NTuple{4, UInt8})
+    x = reinterpret(Tagged, bytes)
+    return (!x.flag || x.level === high) ? nothing : Invalid(Untagged)
+end
+const TAGGED_PAYLOADS = Union{Nothing, EvenBits, TaggedError}
+# A proxy, whose own payloads are those of its conversions
+struct Bounded
+    x::Odd16
+end
+BitScribbling.codec_scheme(::Type{Bounded}, ::Endianness) = Proxy{Odd16}()
+BitScribbling.codec_decode_invalid_type(::Type{Bounded}, ::Endianness) = RangeError
+BitScribbling.codec_encode_invalid_type(::Type{Bounded}, ::Endianness) = RangeError
+in_bounds(x::Odd16) = reinterpret(UInt16, x) < 0x1000
+function BitScribbling.try_to_proxy(x::Bounded, ::Endianness)
+    return in_bounds(x.x) ? x.x : Invalid(OutOfRange)
+end
+function BitScribbling.try_from_proxy(::Type{Bounded}, x::Odd16, ::Endianness)
+    return in_bounds(x) ? Bounded(x) : Invalid(OutOfRange)
+end
+
+# Codecs that break the contract of payloads, by returning payloads of types not declared
+struct Undeclared <: Encoding end
+BitScribbling.codec_max_encoded_size(::Type{UInt8}, ::Undeclared) = Val(1)
+function BitScribbling.codec_try_decode(input::DecodeInput, ::Type{UInt8}, ::Undeclared)
+    b = (@? require_bytes(input, 1))[1]
+    return iszero(b) ? Invalid(:zero) : (b, 1)
+end
+function BitScribbling.codec_try_encode!(output::EncodeOutput, x::UInt8, ::Undeclared)
+    iszero(x) && return Invalid(:zero)
+    (@? reserve_bytes(output, 1))[1] = x
+    return 1
+end
+# Passes on the payloads of a field, without declaring them
+BitScribbling.codec_max_encoded_size(::Type{UInt16}, ::Undeclared) = Val(3)
+function BitScribbling.codec_try_decode(input::DecodeInput, ::Type{UInt16}, ::Undeclared)
+    (x, n, _) = @? decode_field(input, UInt8, Digits())
+    return (UInt16(x), n)
+end
+# Declares payloads, but returns `Invalid()`, which is only allowed if they include `Nothing`
+struct Bare <: Encoding end
+BitScribbling.codec_max_encoded_size(::Type{UInt8}, ::Bare) = Val(1)
+BitScribbling.codec_decode_invalid_type(::Type{UInt8}, ::Bare) = ParseError
+function BitScribbling.codec_try_decode(input::DecodeInput, ::Type{UInt8}, ::Bare)
+    b = (@? require_bytes(input, 1))[1]
+    b == 0xff && return Invalid(Overflow)
+    b == 0x00 && return Invalid()
+    return (b, 1)
+end
+# Primitive types whose `validate_bits` returns a payload of the wrong type, or a Bool
+primitive type WrongPayload8 8 end
+BitScribbling.codec_scheme(::Type{WrongPayload8}, ::Endianness) = BitsStorable()
+BitScribbling.validate_bits(::Type{WrongPayload8}, bytes::NTuple{1, UInt8}) = iszero(bytes[1]) ? Invalid(1) : nothing
+primitive type BoolValidated8 8 end
+BitScribbling.codec_scheme(::Type{BoolValidated8}, ::Endianness) = BitsStorable()
+BitScribbling.validate_bits(::Type{BoolValidated8}, bytes::NTuple{1, UInt8}) = !iszero(bytes[1])
+
 # The bytes `x` encodes to
 encoding(x, e) = (buf = zeros(UInt8, max_encoded_size(typeof(x), e)); buf[1:encode!(buf, x, e)])
 
@@ -585,6 +754,15 @@ const CODEC_CASES = let
         (Nest, BigEndian(), Nest(Span(0x0102, 0x0304))),
         (Wrapped, Latin1(), Wrapped('é')),
         (Tuple{Span, UInt8}, LittleEndian(), (Span(0x0001, 0x0002), 0x03)),
+        # Codecs with payloads
+        (UInt16, Digits(), 0x1234),
+        (DigitPair, Digits(), DigitPair(12, 255)),
+        (Char, Ascii(), 'a'),
+        (Odd16, LittleEndian(), Odd16(0x0123)),
+        (Tagged, BigEndian(), Tagged(Odd16(0x0101), true, high)),
+        (Tuple{Odd16, Bool, Level}, LittleEndian(), (Odd16(0x0003), false, low)),
+        (Tuple{Bool, Odd16}, BigEndian(), (true, Odd16(0x0005))),
+        (Bounded, LittleEndian(), Bounded(Odd16(0x0011))),
     ]
     HAS_NARROW && push!(cases, (U29, LittleEndian(), U29(0x01234567)))
     cases

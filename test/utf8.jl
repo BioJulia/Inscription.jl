@@ -70,13 +70,13 @@ string_chars(bytes) = [(s[i], i) for s in (String(copy(bytes)),) for i in eachin
         # Scratch memory of exactly the size, or too short
         n = ncodeunits(c)
         @test try_encode!(zeros(UInt8, n), c, UTF8()) === n
-        @test try_encode!(zeros(UInt8, n - 1), c, UTF8()) === EncodeError(InsufficientSpace)
+        @test try_encode!(zeros(UInt8, n - 1), c, UTF8()) == EncodeError(InsufficientSpace)
         @test_throws LightBoundsError encode!(zeros(UInt8, n - 1), c, UTF8())
         for len in 0:6
             buf = fill(0xaa, len)
             n = try_encode!(MemoryView(buf), c, UTF8())
             if len < ncodeunits(c)
-                @test n === EncodeError(InsufficientSpace)
+                @test n == EncodeError(InsufficientSpace)
                 err = try
                     encode!(MemoryView(buf), c, UTF8())
                 catch e
@@ -105,11 +105,11 @@ string_chars(bytes) = [(s[i], i) for s in (String(copy(bytes)),) for i in eachin
             0xe2008200,       # zero byte inside the code units
         )
         c = reinterpret(Char, u)
-        @test try_encode!(SCRATCH, c, UTF8()) === EncodeError(InvalidValue)
+        @test try_encode!(SCRATCH, c, UTF8()) == EncodeError(InvalidValue)
         # Unless the scratch memory is too short for any Char
         @test try_encode!(UInt8[], c, UTF8()) isa EncodeError
         buf = zeros(UInt8, 4)
-        @test try_encode!(MemoryView(buf), c, UTF8()) === EncodeError(InvalidValue)
+        @test try_encode!(MemoryView(buf), c, UTF8()) == EncodeError(InvalidValue)
         @test_throws EncodeError encode!(MemoryView(buf), c, UTF8())
         @test_throws EncodeError encode!(SCRATCH, c, UTF8())
     end

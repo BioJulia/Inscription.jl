@@ -47,7 +47,7 @@ and then BitScribbling's functions automatically work for instances of `MyType` 
 
 Other types, like `Bool`, can be written directly to memory, but they cannot be loaded directly from memory,
 as some bit patterns are invalid. Users can define such a type as `BitsStorable()`, in which case they
-only need to add a method to `BitScribbling.is_valid_bits` to validate a given bit pattern for their type.
+only need to add a method to `BitScribbling.validate_bits` to validate a given bit pattern for their type.
 This method is only needed for decoding.
 Then, all the functions in BitScribbling.jl will work for such types for encodings `LittleEndian` and `BigEndian`.
 
@@ -63,6 +63,20 @@ Finally, some types can't be read or written directly. For example, it makes lit
 as `LittleEndian` or `BigEndian` - this should probably be encoded via an encoding like [`UTF8`](@ref) or `UTF32`.
 Other types may have custom, arbitrary serialization rules. For such types, the `codec_scheme` must stay
 the default value of `Manual()`, and users must implement a codec.
+
+#### Errors and payloads
+Decoding fails with a [`DecodeError`](@ref), and encoding with an [`EncodeError`](@ref).
+Their `kind` says what went wrong, e.g. that the input ended, or that the data is invalid.
+When the data is invalid, or a value can't be encoded, the codec may say why with a
+*payload*, such as an enum value `Overflow` from a codec that parses integers.
+Inside a codec, a failure is an [`Invalid`](@ref BitScribbling.Invalid) value, which holds the payload.
+
+The type of the payloads of a type and encoding is declared, and defaults to `Nothing`.
+Values made of other values, such as tuples, structs and proxies, pass on the payloads of
+their parts, so their payload type is the union of their parts' payload types.
+Since the type is known in advance, an error has the same concrete type whatever went wrong,
+so errors are as fast to return as values.
+See [`BitScribbling.decode_invalid_type`](@ref).
 
 #### Encode, decode, load, store
 BitScribbling.jl uses [`encode!`](@ref) to store a value into a byte array, and [`decode`](@ref) to load it from a byte array.

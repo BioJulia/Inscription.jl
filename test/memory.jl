@@ -18,7 +18,7 @@
                 elseif expected[2] == len - i + 1
                     expected[1]
                 else
-                    DecodeError(TrailingData)
+                    BitScribbling.decode_error(T, e, TrailingData)
                 end
                 @test isequal(try_decode_exact(mem, i, T, e), exact)
                 @test isequal(try_decode_exact(mem[i:end], T, e), exact)
@@ -59,13 +59,13 @@
     mem = MemoryView(bytes)
     @test decode(mem, 2, UInt32, BigEndian()) === 0x02030405
     @test decode_next(mem, 2, UInt32, BigEndian()) === (0x02030405, 6)
-    @test try_decode(mem, 6, UInt8, BigEndian()) === DecodeError(EndOfInput)
-    @test try_decode_next(mem, 6, UInt8, BigEndian()) === DecodeError(EndOfInput)
-    @test try_decode(mem, 3, UInt32, BigEndian()) === DecodeError(Truncated)
-    @test try_decode(mem, 6, Char, UTF8()) === DecodeError(EndOfInput)
-    @test try_encode!(mem, 6, 0x01, BigEndian()) === EncodeError(InsufficientSpace)
-    @test try_encode!(mem, 3, 0x01020304, BigEndian()) === EncodeError(InsufficientSpace)
-    @test try_encode!(mem, 6, 'a', UTF8()) === EncodeError(InsufficientSpace)
+    @test try_decode(mem, 6, UInt8, BigEndian()) == DecodeError(EndOfInput)
+    @test try_decode_next(mem, 6, UInt8, BigEndian()) == DecodeError(EndOfInput)
+    @test try_decode(mem, 3, UInt32, BigEndian()) == DecodeError(Truncated)
+    @test try_decode(mem, 6, Char, UTF8()) == DecodeError(EndOfInput)
+    @test try_encode!(mem, 6, 0x01, BigEndian()) == EncodeError(InsufficientSpace)
+    @test try_encode!(mem, 3, 0x01020304, BigEndian()) == EncodeError(InsufficientSpace)
+    @test try_encode!(mem, 6, 'a', UTF8()) == EncodeError(InsufficientSpace)
     @test bytes == [0x01, 0x02, 0x03, 0x04, 0x05]
     # Any integer type of index
     @test decode(mem, UInt8(2), UInt16, LittleEndian()) === 0x0302
@@ -91,8 +91,8 @@
     @test bytes == [0x01, 0x02, 0x03, 0x04, 0x05]
     # Also when empty
     empty_mem = MemoryView(UInt8[])
-    @test try_decode(empty_mem, 1, UInt8, LittleEndian()) === DecodeError(EndOfInput)
-    @test try_decode(empty_mem, 1, Char, UTF8()) === DecodeError(EndOfInput)
+    @test try_decode(empty_mem, 1, UInt8, LittleEndian()) == DecodeError(EndOfInput)
+    @test try_decode(empty_mem, 1, Char, UTF8()) == DecodeError(EndOfInput)
     @test_throws LightBoundsError try_decode(empty_mem, 2, UInt8, LittleEndian())
     @test_throws LightBoundsError try_decode(empty_mem, 2, Char, UTF8())
 end
@@ -153,16 +153,16 @@ end
 
 @testset "Exact decoding and loading" begin
     @test try_decode_exact(MemoryView([0x01, 0x02]), UInt16, BigEndian()) === 0x0102
-    @test try_decode_exact(MemoryView([0x01, 0x02, 0x03]), UInt16, BigEndian()) === DecodeError(TrailingData)
-    @test try_decode_exact(MemoryView([0x01]), UInt16, BigEndian()) === DecodeError(Truncated)
-    @test try_decode_exact(MemoryView(UInt8[]), UInt16, BigEndian()) === DecodeError(EndOfInput)
+    @test try_decode_exact(MemoryView([0x01, 0x02, 0x03]), UInt16, BigEndian()) == DecodeError(TrailingData)
+    @test try_decode_exact(MemoryView([0x01]), UInt16, BigEndian()) == DecodeError(Truncated)
+    @test try_decode_exact(MemoryView(UInt8[]), UInt16, BigEndian()) == DecodeError(EndOfInput)
     # The errors of decoding come first
-    @test try_decode_exact(MemoryView([0x02, 0x00]), Bool, LittleEndian()) === DecodeError(InvalidData)
-    @test_throws DecodeError(TrailingData) decode_exact(MemoryView([0x01, 0x02, 0x03]), UInt16, BigEndian())
-    @test_throws DecodeError(InvalidData) decode_exact(MemoryView([0x02, 0x00]), Bool, LittleEndian())
+    @test try_decode_exact(MemoryView([0x02, 0x00]), Bool, LittleEndian()) == DecodeError(InvalidData)
+    @test_error DecodeError(TrailingData) decode_exact(MemoryView([0x01, 0x02, 0x03]), UInt16, BigEndian())
+    @test_error DecodeError(InvalidData) decode_exact(MemoryView([0x02, 0x00]), Bool, LittleEndian())
     # Variable-length encodings
     @test try_decode_exact(MemoryView("€"), Char, UTF8()) === '€'
-    @test try_decode_exact(MemoryView("€a"), Char, UTF8()) === DecodeError(TrailingData)
+    @test try_decode_exact(MemoryView("€a"), Char, UTF8()) == DecodeError(TrailingData)
     @test try_decode_exact(MemoryView("a€"), 2, Char, UTF8()) === '€'
     @test decode_exact(MemoryView("\xe2\x82"), Char, UTF8()) === '\xe2\x82'
     # Memory that `MemoryView` can view
@@ -172,26 +172,26 @@ end
 
     io = CursorReader([0x00, 0x01, 0x02, 0x03, 0x04])
     @test try_load_exact(io, 2, UInt16, BigEndian()) === 0x0001
-    @test try_load_exact(io, 3, UInt16, BigEndian()) === DecodeError(TrailingData)
-    @test try_load_exact(io, 1, UInt16, BigEndian()) === DecodeError(Truncated)
+    @test try_load_exact(io, 3, UInt16, BigEndian()) == DecodeError(TrailingData)
+    @test try_load_exact(io, 1, UInt16, BigEndian()) == DecodeError(Truncated)
     # EOF within the bytes
-    @test try_load_exact(io, 4, UInt8, BigEndian()) === DecodeError(Truncated)
+    @test try_load_exact(io, 4, UInt8, BigEndian()) == DecodeError(Truncated)
     @test length(get_buffer(io)) == 3 # nothing consumed
-    @test_throws DecodeError(TrailingData) load_exact(io, 2, UInt8, BigEndian())
+    @test_error DecodeError(TrailingData) load_exact(io, 2, UInt8, BigEndian())
     @test load_exact(io, 1, UInt8, BigEndian()) === 0x02
     @test load_exact(io, 2, UInt16, BigEndian()) === 0x0304
-    @test try_load_exact(io, 1, UInt8, BigEndian()) === DecodeError(EndOfInput)
-    @test try_load_exact(io, 0, UInt8, BigEndian()) === DecodeError(EndOfInput)
+    @test try_load_exact(io, 1, UInt8, BigEndian()) == DecodeError(EndOfInput)
+    @test try_load_exact(io, 0, UInt8, BigEndian()) == DecodeError(EndOfInput)
     @test_throws ArgumentError try_load_exact(io, -1, UInt8, BigEndian())
     # Invalid data is not consumed
     io = CursorReader([0x02, 0x01])
-    @test try_load_exact(io, 1, Bool, LittleEndian()) === DecodeError(InvalidData)
+    @test try_load_exact(io, 1, Bool, LittleEndian()) == DecodeError(InvalidData)
     @test length(get_buffer(io)) == 2
     # Bytes straddling fills
     io = ChunkedReader([[0xe2], [0x82], [0xac, 0x61]])
     @test try_load_exact(io, 3, Char, UTF8()) === '€'
     @test try_load_exact(io, 1, Char, UTF8()) === 'a'
-    @test try_load_exact(io, 1, Char, UTF8()) === DecodeError(EndOfInput)
+    @test try_load_exact(io, 1, Char, UTF8()) == DecodeError(EndOfInput)
     for max_fill in 1:5
         io = BoundedReader(collect(UInt8, 1:12), 6; max_fill)
         @test [load_exact(io, 4, UInt32, BigEndian()) for _ in 1:3] == [0x01020304, 0x05060708, 0x090a0b0c]
@@ -199,5 +199,5 @@ end
     # More bytes than the buffer capacity
     @test_throws IOError try_load_exact(BoundedReader(zeros(UInt8, 8), 2), 4, UInt32, LittleEndian())
     # More bytes than `max_encoded_size`
-    @test try_load_exact(CursorReader(zeros(UInt8, 8)), 8, UInt32, LittleEndian()) === DecodeError(TrailingData)
+    @test try_load_exact(CursorReader(zeros(UInt8, 8)), 8, UInt32, LittleEndian()) == DecodeError(TrailingData)
 end

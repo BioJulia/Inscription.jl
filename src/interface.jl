@@ -95,7 +95,8 @@ encoding ends at the end of `mem`, use [`try_decode_exact`](@ref).
 The error kind is:
 * `EndOfInput` if no bytes remain;
 * `Truncated` if `mem` ends partway through an encoding;
-* `InvalidData` if the bytes are not a valid encoding.
+* `InvalidData` if the bytes are not a valid encoding. Then the error may have a payload
+  that tells why, see [`DecodeError`](@ref).
 
 To customize it for your own type, implement a codec, see [`Encoding`](@ref), or add a method
 to it, see [Overloading functions](@ref overloading).
@@ -111,7 +112,7 @@ julia> try_decode(MemoryView([0x01, 0x02, 0x03]), 2, UInt16, LittleEndian())
 0x0302
 
 julia> try_decode(MemoryView([0x01]), UInt16, LittleEndian())
-DecodeError(BitScribbling.DecodeErrorKinds.Truncated)
+DecodeError{Union{}}(BitScribbling.DecodeErrorKinds.Truncated)
 
 julia> try_decode(MemoryView([0x02]), Bool, LittleEndian())
 DecodeError(BitScribbling.DecodeErrorKinds.InvalidData)
@@ -188,7 +189,7 @@ julia> try_decode_next(mem, 2, Char, UTF8())
 ('é', 4)
 
 julia> try_decode_next(mem, 4, Char, UTF8())
-DecodeError(BitScribbling.DecodeErrorKinds.EndOfInput)
+DecodeError{Union{}}(BitScribbling.DecodeErrorKinds.EndOfInput)
 ```
 """
 @inline function try_decode_next(
@@ -260,13 +261,13 @@ julia> try_decode_exact(MemoryView([0x01, 0x02]), UInt16, BigEndian())
 0x0102
 
 julia> try_decode_exact(MemoryView([0x01, 0x02, 0x03]), UInt16, BigEndian())
-DecodeError(BitScribbling.DecodeErrorKinds.TrailingData)
+DecodeError{Union{}}(BitScribbling.DecodeErrorKinds.TrailingData)
 
 julia> try_decode_exact(MemoryView([0x01, 0x02, 0x03]), 2, UInt16, BigEndian())
 0x0203
 
 julia> try_decode_exact(MemoryView([0x01]), UInt16, BigEndian())
-DecodeError(BitScribbling.DecodeErrorKinds.Truncated)
+DecodeError{Union{}}(BitScribbling.DecodeErrorKinds.Truncated)
 ```
 """
 @inline function try_decode_exact(
@@ -275,7 +276,7 @@ DecodeError(BitScribbling.DecodeErrorKinds.Truncated)
     i = Int(i)::Int
     (x, n) = @? try_decode_sized(mem, i, T, enc)
     # `try_decode_sized` checked that `i` is valid and that `n` bytes remain from it
-    n == length(mem) - i + 1 || return DecodeError(TrailingData)
+    n == length(mem) - i + 1 || return decode_error(T, enc, TrailingData)
     return x
 end
 
@@ -307,7 +308,7 @@ Base.@propagate_inbounds function decode_exact(
     result = try_decode_sized(mem, i, T, enc)
     result isa DecodeError && throw_decode_error(result)
     (x, n) = result
-    n == length(mem) - i + 1 || throw_decode_error(DecodeError(TrailingData))
+    n == length(mem) - i + 1 || throw_decode_error(decode_error(T, enc, TrailingData))
     return x
 end
 
@@ -337,19 +338,20 @@ end
         # it is known not to be empty. `i` is compared to the length of `mem`, like callers
         # that loop over `mem` do, so the compiler can remove the comparison.
         if !holds_any(length(imem) - i + 1, T, enc)
-            i > length(imem) && return DecodeError(EndOfInput)
+            i > length(imem) && return decode_error(T, enc, EndOfInput)
             return decode_memory_short(nonempty_suffix(imem, i), T, enc)
         end
         result = decode_full(nonempty_suffix(imem, i), T, enc)
-        result isa Invalid && return DecodeError(InvalidData)
+        result isa Invalid && return decode_error(T, enc, result)
         return result
     end
     n = bits_encoded_size(T)
     @boundscheck if !has_bytes(mem, i, n)
         check_start_index(mem, i)
-        return DecodeError(i > length(mem) ? EndOfInput : Truncated)
+        return decode_error(T, enc, i > length(mem) ? EndOfInput : Truncated)
     end
-    x = @? unsafe_decode_bits(kind, mem, i - 1, T, enc)
+    x = unsafe_decode_bits(kind, mem, i - 1, T, enc)
+    x isa Invalid && return decode_error(T, enc, x)
     return (x, n)
 end
 
@@ -360,8 +362,8 @@ end
     )::Union{Tuple{T, Int}, DecodeError} where {T}
     # Since `mem` is not empty, the check of a codec that reads one byte is removed
     result = call_codec_try_decode(MemoryInput{1}(mem, true), T, enc)
-    result isa TooShort && return DecodeError(Truncated)
-    result isa Invalid && return DecodeError(InvalidData)
+    result isa TooShort && return decode_error(T, enc, Truncated)
+    result isa Invalid && return decode_error(T, enc, result)
     return result
 end
 
@@ -386,7 +388,7 @@ end
         kind, mem::ImmutableMemoryView{UInt8}, ::Type{T}, enc::Endianness
     )::Union{Tuple{T, Int}, Invalid} where {T}
     x = unsafe_decode_bits(kind, mem, 0, T, enc)
-    x isa DecodeError && return Invalid()
+    x isa Invalid && return x
     return (x, bits_encoded_size(T))
 end
 
@@ -424,7 +426,8 @@ Return the number of bytes written, or an [`EncodeError`](@ref).
 The error kind is:
 * `InsufficientSpace` if the bytes from `i` to the end of `mem` are too few for the
   encoding of `x`;
-* `InvalidValue` if `x` can't be encoded with `enc`.
+* `InvalidValue` if `x` can't be encoded with `enc`. Then the error may have a payload
+  that tells why, see [`EncodeError`](@ref).
 
 On error, the bytes from `i` up to [`max_encoded_size(T, enc)`](@ref max_encoded_size)
 bytes later, but not beyond the end of `mem`, may have been written, and their contents
@@ -449,7 +452,7 @@ julia> try_encode!(MemoryView(v), 2, 0x0304, BigEndian()), v
 (2, UInt8[0x01, 0x03, 0x04])
 
 julia> try_encode!(MemoryView(v), 0x01020304, BigEndian()) # too short
-EncodeError(BitScribbling.EncodeErrorKinds.InsufficientSpace)
+EncodeError{Union{}}(BitScribbling.EncodeErrorKinds.InsufficientSpace)
 ```
 """
 @inline function try_encode!(
@@ -476,13 +479,13 @@ end
             return encode_memory_short(unsafe_suffix(mem, i), x, enc)
         end
         result = encode_full(nonempty_suffix(mem, i), x, enc)
-        result isa Invalid && return EncodeError(InvalidValue)
+        result isa Invalid && return encode_error(T, enc, result)
         return result
     end
     n = bits_encoded_size(T)
     @boundscheck if !has_bytes(mem, i, n)
         check_start_index(mem, i)
-        return EncodeError(InsufficientSpace)
+        return encode_error(T, enc, InsufficientSpace)
     end
     unsafe_encode_bits!(mem, i - 1, x, enc)
     return n
@@ -490,10 +493,12 @@ end
 
 # The slow path of `_try_encode!`: encode `x` into `mem`, which is shorter than
 # `max_encoded_size`.
-@inline function encode_memory_short(mem::MutableMemoryView{UInt8}, x, enc::Encoding)::Union{Int, EncodeError}
+@inline function encode_memory_short(
+        mem::MutableMemoryView{UInt8}, x::T, enc::Encoding
+    )::Union{Int, EncodeError} where {T}
     result = encode_short(mem, x, enc)
-    result isa TooShort && return EncodeError(InsufficientSpace)
-    result isa Invalid && return EncodeError(InvalidValue)
+    result isa TooShort && return encode_error(T, enc, InsufficientSpace)
+    result isa Invalid && return encode_error(T, enc, result)
     return result
 end
 
@@ -640,7 +645,10 @@ type `E`, see [`Encoding`](@ref). Never call it directly; call e.g. [`try_decode
 It is only needed for decoding: a codec that is only used for encoding need not implement it.
 
 Decode a `T` from the start of `input`, and return it with the number of bytes it was
-decoded from. Return [`Invalid()`](@ref Invalid) if the bytes are not a valid encoding.
+decoded from. Return an [`Invalid`](@ref) if the bytes are not a valid encoding. Its
+payload may tell why, and must be of the type
+[`codec_decode_invalid_type(T, E())`](@ref codec_decode_invalid_type), which defaults to
+`Nothing`, the type of `Invalid()`.
 
 Read `input` only through [`require_bytes`](@ref), [`peek_byte`](@ref) and
 [`decode_field`](@ref), and return their [`TooShort`](@ref) with [`@?`](@ref). The codec
@@ -794,9 +802,14 @@ end
 
 Decode a `T` with the encoding `enc` from the start of `input`. Return
 `(x, n, rest)`, where `x::T` was decoded from `n` bytes, and `rest` is the input after
-them. Else, return [`TooShort`](@ref) or [`Invalid()`](@ref Invalid). Use
+them. Else, return [`TooShort`](@ref), or an [`Invalid`](@ref) whose payload is of the
+type [`decode_invalid_type(T, enc)`](@ref decode_invalid_type). Use
 with [`@?`](@ref) in [`codec_try_decode`](@ref), for encodings that contain the
 encodings of other values.
+
+When the codec returns that `Invalid`, its own payload type must include that of `T`,
+see [`codec_decode_invalid_type`](@ref). Otherwise, it may return its own `Invalid`
+instead.
 
 May invalidate views of the input, see [`DecodeInput`](@ref).
 
@@ -871,7 +884,9 @@ type `E`, see [`Encoding`](@ref). Never call it directly; call [`try_encode!`](@
 It is only needed for encoding: a codec that is only used for decoding need not implement it.
 
 Encode `x` at the start of `output`, and return the number of bytes written. Return
-[`Invalid()`](@ref Invalid) if `x` can't be encoded.
+an [`Invalid`](@ref) if `x` can't be encoded. Its payload may tell why, and must be of
+the type [`codec_encode_invalid_type(T, E())`](@ref codec_encode_invalid_type), which
+defaults to `Nothing`, the type of `Invalid()`.
 
 Write `output` only through [`reserve_bytes`](@ref) and [`encode_field`](@ref), and return
 their [`TooShort`](@ref) with [`@?`](@ref). Don't read the bytes of `output`.
@@ -928,8 +943,11 @@ end
 
 Encode `x` with the encoding `enc` at the start of `output`. Return `(n, rest)`, where
 `n` is the number of bytes written, and `rest` is the output after them. Else, return
-[`TooShort`](@ref) or [`Invalid()`](@ref Invalid). Use with [`@?`](@ref) in
+[`TooShort`](@ref), or an [`Invalid`](@ref) whose payload is of the type
+[`encode_invalid_type(T, enc)`](@ref encode_invalid_type). Use with [`@?`](@ref) in
 [`codec_try_encode!`](@ref), for encodings that contain the encodings of other values.
+As for [`decode_field`](@ref), a codec that returns that `Invalid` must declare its
+payload type.
 
 As for [`decode_field`](@ref), when `output` is known to hold at least
 `max_encoded_size(T, enc)` bytes, `x` is encoded on the fast path, and `rest` is known to
@@ -965,7 +983,8 @@ end
     scheme = codec_kind(T, enc)
     scheme isa Proxy && return proxy_try_decode(input, T, scheme, enc)
     result = codec_try_decode(input, T, enc)
-    result isa Union{TooShort, Invalid} && return result
+    result isa TooShort && return result
+    result isa Invalid && return as_decode_invalid(result, codec_try_decode, T, enc)
     (x, n) = result
     # Check only what keeps a broken codec from causing undefined behaviour or endless
     # loops, see `valid_count`. LLVM often removes this check, when the codec has checked
@@ -982,7 +1001,8 @@ end
     scheme = codec_kind(T, enc)
     scheme isa Proxy && return proxy_try_encode!(output, x, scheme, enc)
     n = codec_try_encode!(output, x, enc)
-    n isa Union{TooShort, Invalid} && return n
+    n isa TooShort && return n
+    n isa Invalid && return as_encode_invalid(n, codec_try_encode!, T, enc)
     # Check only what keeps a broken codec from causing undefined behaviour or endless
     # loops, see `call_codec_try_decode`.
     len = length(output.mem)

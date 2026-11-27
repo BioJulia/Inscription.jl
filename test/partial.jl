@@ -51,14 +51,14 @@
     function partial(bytes, T, e)
         result = BitScribbling.decode_start(ImmutableMemoryView(bytes), T, e, false)
         result isa TooShort && return DecodeError(Truncated)
-        result isa Invalid && return DecodeError(InvalidData)
+        result isa Invalid && return BitScribbling.decode_error(T, e, result)
         return result
     end
-    is_undecided(result) = result === DecodeError(Truncated)
+    is_undecided(result) = result == DecodeError(Truncated)
     @test is_undecided(partial([0x61], Tuple{Char, Char}, Latin1()))
     for (T, e) in ((Char, UTF8()), (UInt16, BigEndian()), (Tuple{Bool, UInt32}, BigEndian()), (UInt8, Decimal()))
-        @test partial(UInt8[], T, e) === DecodeError(Truncated)
-        @test try_decode(MemoryView(UInt8[]), T, e) === DecodeError(EndOfInput)
+        @test partial(UInt8[], T, e) == DecodeError(Truncated)
+        @test try_decode(MemoryView(UInt8[]), T, e) == DecodeError(EndOfInput)
     end
 
     # The functions that codecs read their input through. `L` is the number of bytes
@@ -138,7 +138,7 @@
     @test load(StallingReader([bytes[1:1], bytes[2:end]]), UInt64, Prefixed()) === UInt64(200)
     @test PREFIXED_CALLS[] ≤ 4
     # A reader that ends early
-    @test try_load(CursorReader(bytes[1:100]), UInt64, Prefixed()) === DecodeError(Truncated)
+    @test try_load(CursorReader(bytes[1:100]), UInt64, Prefixed()) == DecodeError(Truncated)
 
     # A codec that reads more than `max_encoded_size` bytes breaks its contract: it
     # can't, since the input ends after them
@@ -147,8 +147,8 @@
     @test_throws ErrorException try_load(StallingReader([[0x00], [0x00]]), UInt8, Greedy())
     @test_throws ErrorException try_encode!(MemoryView(zeros(UInt8, 10)), 0x00, Greedy())
     # With less than `max_encoded_size` bytes, `TooShort` is allowed
-    @test try_decode(MemoryView([0x00]), UInt8, Greedy()) === DecodeError(Truncated)
-    @test try_encode!(MemoryView([0x00]), 0x00, Greedy()) === EncodeError(InsufficientSpace)
+    @test try_decode(MemoryView([0x00]), UInt8, Greedy()) == DecodeError(Truncated)
+    @test try_encode!(MemoryView([0x00]), 0x00, Greedy()) == EncodeError(InsufficientSpace)
 
     # The contract for partial input: a decided result is the result for every input
     # that starts with the bytes, and `max_encoded_size` bytes always decide it

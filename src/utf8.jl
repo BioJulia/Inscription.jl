@@ -1,5 +1,8 @@
 codec_max_encoded_size(::Type{Char}, ::UTF8) = Val(4)
 
+# Any bytes decode as a Char, possibly malformed, see the docstring of `UTF8`
+codec_decode_invalid_type(::Type{Char}, ::UTF8) = Union{}
+
 # Whether `c` is a Char that `codec_try_decode` can return, i.e. one that
 # `iterate(::String)` can produce. Other Chars can only be made with e.g. `reinterpret`,
 # and their code units don't decode to themselves, so they can't be encoded.

@@ -5,27 +5,27 @@
         @test try_encode!(SCRATCH, c, Latin1()) === encode!(SCRATCH, c, Latin1()) === 1
     end
     for c in ('λ', '€', '\u0100', '\xff', '\ud800')
-        @test try_encode!(SCRATCH, c, Latin1()) === EncodeError(InvalidValue)
-        @test_throws EncodeError(InvalidValue) encode!(SCRATCH, c, Latin1())
+        @test try_encode!(SCRATCH, c, Latin1()) == EncodeError(InvalidValue)
+        @test_error EncodeError(InvalidValue) encode!(SCRATCH, c, Latin1())
         for len in 0:2
             buf = fill(0xaa, len)
-            @test try_encode!(MemoryView(buf), c, Latin1()) === EncodeError(InvalidValue)
+            @test try_encode!(MemoryView(buf), c, Latin1()) == EncodeError(InvalidValue)
             # Also when `mem` is too short, as this codec checks the value first
-            @test_throws EncodeError(InvalidValue) encode!(MemoryView(buf), c, Latin1())
+            @test_error EncodeError(InvalidValue) encode!(MemoryView(buf), c, Latin1())
             if len ≥ 1
                 # The value is checked also in an `@inbounds` context
-                @test_throws EncodeError(InvalidValue) encode_inbounds!(MemoryView(buf), 1, c, Latin1())
+                @test_error EncodeError(InvalidValue) encode_inbounds!(MemoryView(buf), 1, c, Latin1())
             end
             # This codec checks the value before writing
             @test buf == fill(0xaa, len)
         end
         io = VecWriter()
-        @test try_store(io, c, Latin1()) === EncodeError(InvalidValue)
-        @test_throws EncodeError(InvalidValue) store(io, c, Latin1())
+        @test try_store(io, c, Latin1()) == EncodeError(InvalidValue)
+        @test_error EncodeError(InvalidValue) store(io, c, Latin1())
         @test isempty(io.vec)
     end
     # Too little space for a valid value
-    @test try_encode!(MemoryView(UInt8[]), 'a', Latin1()) === EncodeError(InsufficientSpace)
+    @test try_encode!(MemoryView(UInt8[]), 'a', Latin1()) == EncodeError(InsufficientSpace)
     @test_throws LightBoundsError encode!(MemoryView(UInt8[]), 'a', Latin1())
     io = VecWriter()
     @test try_store(io, 'é', Latin1()) === 1
@@ -37,15 +37,15 @@
     buf = fill(0xaa, 6)
     @test encode_all!(MemoryView(buf), MemoryView(src), Latin1()) == (2, 2)
     @test buf[1:2] == [0x61, 0x62]
-    @test try_encode!(MemoryView(buf), 3, src[3], Latin1()) === EncodeError(InvalidValue)
+    @test try_encode!(MemoryView(buf), 3, src[3], Latin1()) == EncodeError(InvalidValue)
     for cap in (1, 2, 3, 100)
         sink = UInt8[]
         io = BoundedWriter(sink, cap)
-        @test_throws EncodeError(InvalidValue) store_every(io, MemoryView(src), Latin1())
+        @test_error EncodeError(InvalidValue) store_every(io, MemoryView(src), Latin1())
         flush(io)
         @test sink == [0x61, 0x62]
     end
-    @test_throws EncodeError(InvalidValue) store_every(VecWriter(), MemoryView(['λ']), Latin1())
+    @test_error EncodeError(InvalidValue) store_every(VecWriter(), MemoryView(['λ']), Latin1())
     for cap in (1, 2, 3, 100)
         sink = UInt8[]
         io = BoundedWriter(sink, cap)
@@ -59,7 +59,7 @@
     @test store_all(io, MemoryView(['λ']), Latin1()) == (0, 0)
     @test isempty(io.vec)
     buf = fill(0xaa, 6)
-    @test_throws EncodeError(InvalidValue) encode_every!(MemoryView(buf), MemoryView(src), Latin1())
+    @test_error EncodeError(InvalidValue) encode_every!(MemoryView(buf), MemoryView(src), Latin1())
     @test buf[1:2] == [0x61, 0x62]
 
     # A codec may write before it finds out that the value is invalid, but not beyond
@@ -67,22 +67,22 @@
     T = Tuple{Char, Char}
     @test max_encoded_size(T, Latin1()) == 2
     @test try_encode!(SCRATCH, ('a', 'b'), Latin1()) === 2
-    @test try_encode!(SCRATCH, ('a', 'λ'), Latin1()) === EncodeError(InvalidValue)
-    @test try_encode!(SCRATCH, ('λ', 'a'), Latin1()) === EncodeError(InvalidValue)
+    @test try_encode!(SCRATCH, ('a', 'λ'), Latin1()) == EncodeError(InvalidValue)
+    @test try_encode!(SCRATCH, ('λ', 'a'), Latin1()) == EncodeError(InvalidValue)
     buf = fill(0xaa, 5)
-    @test try_encode!(MemoryView(buf), 2, ('a', 'λ'), Latin1()) === EncodeError(InvalidValue)
+    @test try_encode!(MemoryView(buf), 2, ('a', 'λ'), Latin1()) == EncodeError(InvalidValue)
     @test buf == [0xaa, 0x61, 0xaa, 0xaa, 0xaa]
-    @test_throws EncodeError(InvalidValue) encode!(MemoryView(buf), 2, ('b', 'λ'), Latin1())
+    @test_error EncodeError(InvalidValue) encode!(MemoryView(buf), 2, ('b', 'λ'), Latin1())
     # When there is too little space, only bytes the encoding would cover are written
     buf = fill(0xaa, 3)
-    @test try_encode!(MemoryView(buf), 3, ('a', 'b'), Latin1()) === EncodeError(InsufficientSpace)
+    @test try_encode!(MemoryView(buf), 3, ('a', 'b'), Latin1()) == EncodeError(InsufficientSpace)
     @test_throws LightBoundsError encode!(MemoryView(buf), 3, ('a', 'b'), Latin1())
     @test buf[1:2] == fill(0xaa, 2)
     @test encode!(MemoryView(buf), 2, ('a', 'b'), Latin1()) === 2
     @test decode(MemoryView(buf), 2, T, Latin1()) === ('a', 'b')
     # Bytes written for an invalid value are not stored
     io = VecWriter()
-    @test try_store(io, ('a', 'λ'), Latin1()) === EncodeError(InvalidValue)
+    @test try_store(io, ('a', 'λ'), Latin1()) == EncodeError(InvalidValue)
     @test isempty(io.vec)
     @test store(io, ('x', 'y'), Latin1()) == 2
     @test io.vec == [0x78, 0x79]
@@ -274,7 +274,7 @@ end
             @test is_err(try_decode(bytes[1:len], T, e), Truncated)
             # Bytes beyond `buf` would have been written, so it's all unspecified
             buf = fill(0xaa, len + 1)
-            @test try_encode!(view(buf, 1:len), x, e) === EncodeError(InsufficientSpace)
+            @test try_encode!(view(buf, 1:len), x, e) == EncodeError(InsufficientSpace)
             @test buf[end] == 0xaa
         end
         # Bulk
@@ -308,13 +308,13 @@ end
     buf = fill(0xaa, 6)
     @test try_encode!(buf, 2, (0x01, Even(0x03)), e) == EncodeError(InvalidValue)
     @test buf[[1, 4, 5, 6]] == fill(0xaa, 4)
-    @test_throws EncodeError(InvalidValue) store(VecWriter(), (0x01, Even(0x03)), e)
+    @test_error EncodeError(InvalidValue) store(VecWriter(), (0x01, Even(0x03)), e)
     # Either error kind may be returned if both apply
     @test try_encode!(zeros(UInt8, 1), (0x01, Even(0x03)), e) isa EncodeError
 
     # An invalid element decides the result, so loading doesn't wait for the rest
-    @test_throws DecodeError(InvalidData) load(StallingReader([[0x02]]), Tuple{Bool, UInt32}, e)
-    @test_throws DecodeError(InvalidData) load(StallingReader([[0x01, 0x03]]), Tuple{UInt8, Even, UInt64}, e)
+    @test_error DecodeError(InvalidData) load(StallingReader([[0x02]]), Tuple{Bool, UInt32}, e)
+    @test_error DecodeError(InvalidData) load(StallingReader([[0x01, 0x03]]), Tuple{UInt8, Even, UInt64}, e)
     @test load(StallingReader([[0x01], [0x02, 0x03], [0x04, 0x05]]), Tuple{Bool, UInt32}, e) === (true, 0x05040302)
     @test_throws ErrorException load(StallingReader([[0x01, 0x02]]), Tuple{Bool, UInt32}, e)
 

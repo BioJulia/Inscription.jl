@@ -1,7 +1,12 @@
 """
-    is_valid_bits(::Type{T}, bytes::NTuple{N, UInt8})::Bool
+    validate_bits(::Type{T}, bytes::NTuple{N, UInt8})::Union{Nothing, Invalid}
 
-Whether the bytes `bytes` are a valid `T`, for a type `T`.
+Check that the bytes `bytes` are a valid `T`, for a type `T`. Return `nothing` if they
+are, else an [`Invalid`](@ref), whose payload may tell why. The type of the payload must
+be [`codec_decode_invalid_type(T, enc)`](@ref codec_decode_invalid_type) for the
+[`Endianness`](@ref) encodings `enc`, which defaults to `Nothing`, the type of
+`Invalid()`.
+
 This function is only called for types whose [`codec_scheme`](@ref) is
 [`BitsStorable()`](@ref BitsStorable).
 It is only called when decoding, so a type that is only encoded need not implement it.
@@ -10,27 +15,38 @@ It is only called when decoding, so a type that is only encoded need not impleme
 The bytes are in given in native byte order, i.e. after any potential byte swapping.
 So, if `bytes` are valid, they are the raw bits of `T`, and the instance of `T` may
 be created with `reinterpret(T, bytes)`.
+If `T` is a struct, the fields of `T` are checked before this is called, and the
+payloads of their errors are passed on, see [`decode_invalid_type`](@ref).
 
 For easier bit manipulation, you can use the helper function [`as_unsigned`](@ref)
 to convert `bytes` to an `Unsigned` integer in native byte order.
+
+# Examples
+```julia
+primitive type Odd64 64 end
+BitScribbling.codec_scheme(::Type{Odd64}, ::Endianness) = BitScribbling.BitsStorable()
+function BitScribbling.validate_bits(::Type{Odd64}, bytes::NTuple{8, UInt8})
+    return isodd(BitScribbling.as_unsigned(bytes)) ? nothing : BitScribbling.Invalid()
+end
 ```
 """
-function is_valid_bits end
+function validate_bits end
 
 # Bool is always 0x00 or 0x01 in memory, but pointer-loading it keeps only the lowest
 # bit, so the bits must be checked before a Bool is made from them.
-is_valid_bits(::Type{Bool}, bytes::NTuple{1, UInt8}) = bytes[1] ≤ 0x01
+validate_bits(::Type{Bool}, bytes::NTuple{1, UInt8}) = bytes[1] ≤ 0x01 ? nothing : Invalid()
 
 # If the values of `T` are contiguous, which is the common case, a range check suffices.
 # `enum_range` is constant-folded, so only one of the branches is compiled.
-@inline function is_valid_bits(::Type{T}, bytes::NTuple{N, UInt8}) where {T <: Enum, N}
+@inline function validate_bits(::Type{T}, bytes::NTuple{N, UInt8}) where {T <: Enum, N}
     raw = as_unsigned(bytes)
     (lo, span, contiguous) = enum_range(T, typeof(raw))
-    return if contiguous
+    valid = if contiguous
         (raw - lo) ≤ span
     else
         any(x -> to_int(x) % typeof(raw) == raw, instances(T))
     end
+    return valid ? nothing : Invalid()
 end
 
 # The bits of the smallest value of the enum `T`, the difference between the largest
@@ -62,12 +78,12 @@ Convert `bytes`, to the smallest of `UInt8`, `UInt16`, `UInt32`, `UInt64` and `U
 that has at least `N` bytes, zero-extended.
 Throw an `ArgumentError` if `N > 16`.
 
-This is a helper function that users can call in [`is_valid_bits`](@ref),
+This is a helper function that users can call in [`validate_bits`](@ref),
 if they find it easier to operate on an `Unsigned` value rather than an `NTuple{N, UInt8}`.
 
 The input `bytes` is given in native byte order. So, for example, if `N == 8`,
 this function is equivalent to `reinterpret(UInt64, bytes)`.
-When used inside `is_valid_bits`, the byte order has already been made native, so
+When used inside `validate_bits`, the byte order has already been made native, so
 users need not handle endianness.
 
 # Examples
@@ -474,32 +490,54 @@ end
     return :(tuple($((:(bytes[$i]) for i in order)...)))
 end
 
-# Whether the bytes of a T in native byte order are valid, for a bits type T with the
-# byte order `e`.
-@inline function is_valid_value(::Type{T}, bytes::NTuple{N, UInt8}, e::Endianness) where {T, N}
-    codec_scheme(T, e) isa BitsStorable || return true
-    isprimitivetype(T) || fields_valid(T, bytes, e) || return false
-    return is_valid_bits(T, bytes)::Bool
+# Check that the bytes of a T in native byte order are valid, for a bits type T with the
+# byte order `e`. Return `nothing` if they are, else an `Invalid` of the payload type of T.
+@inline function check_value(
+        ::Type{T}, bytes::NTuple{N, UInt8}, e::Endianness
+    )::Union{Nothing, Invalid} where {T, N}
+    codec_scheme(T, e) isa BitsStorable || return nothing
+    if !isprimitivetype(T)
+        result = check_fields(T, bytes, e)
+        result === nothing || return result
+    end
+    result = validate_bits(T, bytes)::Union{Nothing, Invalid}
+    result === nothing && return nothing
+    return as_decode_invalid(result, validate_bits, T, e)
 end
 
-# Whether the bytes of each field of the struct T, in native byte order, are valid.
-# The generator only uses the layout of T. `is_valid_value` is called in the generated
+# Check the bytes of each field of the struct T, in native byte order, as `check_value`.
+# The generator only uses the layout of T. `check_value` is called in the generated
 # code, since it calls methods that may be added later.
-@generated function fields_valid(::Type{T}, bytes::NTuple{N, UInt8}, e::Endianness) where {T, N}
+@generated function check_fields(::Type{T}, bytes::NTuple{N, UInt8}, e::Endianness) where {T, N}
     checks = map(1:fieldcount(T)) do i
         F = fieldtype(T, i)
         offset = Int(fieldoffset(T, i))
         field_bytes = :(tuple($((:(bytes[$(offset + j)]) for j in 1:sizeof(F))...)))
-        :(is_valid_value($F, $field_bytes, e))
+        quote
+            result = check_value($F, $field_bytes, e)
+            result === nothing || return as_decode_invalid(result, validate_bits, T, e)
+        end
     end
-    return foldr((a, b) -> :($a && $b), checks; init = true)
+    return Expr(:block, Expr(:meta, :inline), checks..., :(return nothing))
+end
+
+# The payload type of a BitsStorable type T, see `decode_invalid_type`: that of T itself,
+# and those of its fields, if it is a struct. Generated, so it is constant-folded for any
+# number of fields. The generator only uses the layout of T.
+@generated function bits_decode_invalid_type(::Type{T}, e::Endianness) where {T}
+    Fs = isprimitivetype(T) ? () : fieldtypes(T)
+    return quote
+        $(Expr(:meta, :inline))
+        Union{codec_decode_invalid_type(T, e)::Type, $((:(decode_invalid_type($F, e)) for F in Fs)...)}
+    end
 end
 
 # Decode a T of kind `kind` at `offset` in `mem`. The caller must ensure that the
-# `bits_encoded_size(T)` bytes are within `mem`.
+# `bits_encoded_size(T)` bytes are within `mem`. If the bytes are invalid, return an
+# `Invalid` of the payload type of T.
 @inline function unsafe_decode_bits(
         kind::BitsScheme, mem::MemoryView, offset::Int, ::Type{T}, e::Endianness
-    )::Union{T, DecodeError} where {T}
+    )::Union{T, Invalid} where {T}
     return if isprimitivetype(T)
         unsafe_decode_primitive(kind, mem, offset, T, e)
     else
@@ -509,7 +547,7 @@ end
 
 @inline function unsafe_decode_primitive(
         kind::BitsScheme, mem::MemoryView, offset::Int, ::Type{T}, e::Endianness
-    )::Union{T, DecodeError} where {T}
+    )::Union{T, Invalid} where {T}
     kind isa BitsLoadable && fills_bytes(T) && return unsafe_load_bits(mem, offset, T, e)
     N = bits_encoded_size(T)
     if loads_as_raw(T)
@@ -517,28 +555,31 @@ end
         if kind isa BitsStorable
             # `raw` is in native byte order, so this is a no-op
             bytes = reinterpret(NTuple{N, UInt8}, raw)
-            is_valid_bits(T, bytes)::Bool || return DecodeError(InvalidData)
+            result = check_value(T, bytes, e)
+            result === nothing || return result
         end
         return Core.Intrinsics.bitcast(T, raw)
     end
     least_first = unsafe_load_bytes(mem, offset, Val(N), e)
     if kind isa BitsStorable
         bytes = NATIVE_ENDIAN === LittleEndian() ? least_first : reverse(least_first)
-        is_valid_bits(T, bytes)::Bool || return DecodeError(InvalidData)
+        result = check_value(T, bytes, e)
+        result === nothing || return result
     end
     return from_bytes(T, least_first)
 end
 
 @inline function unsafe_decode_struct(
         kind::BitsScheme, mem::MemoryView, offset::Int, ::Type{T}, e::Endianness
-    )::Union{T, DecodeError} where {T}
+    )::Union{T, Invalid} where {T}
     kind isa BitsLoadable && e === NATIVE_ENDIAN && return unsafe_load_at(mem, T, offset)
     bytes = unsafe_load_at(mem, NTuple{sizeof(T), UInt8}, offset)
     if e !== NATIVE_ENDIAN
         bytes = swap_fields(T, bytes)
     end
     if kind isa BitsStorable
-        is_valid_value(T, bytes, e) || return DecodeError(InvalidData)
+        result = check_value(T, bytes, e)
+        result === nothing || return result
     end
     return reinterpret(T, bytes)
 end

@@ -28,7 +28,13 @@ end
 
 # A `BitsStorable` tuple has no invariants beyond those of its elements, which are
 # checked before this is called.
-is_valid_bits(::Type{<:Tuple}, ::NTuple{N, UInt8}) where {N} = true
+validate_bits(::Type{<:Tuple}, ::NTuple{N, UInt8}) where {N} = nothing
+
+# A tuple returns no `Invalid` of its own, but passes on those of its elements, so its
+# payload type is the union of theirs. That is also so for `BitsStorable` tuples, whose
+# payload type is that of the tuple and its elements, see `bits_decode_invalid_type`.
+# The tuple codec converts the `Invalid` of an element to the payload type of the tuple,
+# so that its result has the same concrete type, whichever element failed.
 
 # The codec of `Manual` tuples. Its methods are generated from the element types, so they
 # are unrolled and type stable. The generators only use the element types, not methods
@@ -43,6 +49,12 @@ for E in (LittleEndian, BigEndian)
         end
         @inline function codec_try_encode!(output::EncodeOutput, x::Tuple, enc::$E)
             return tuple_try_encode!(output, x, enc)
+        end
+        @inline function codec_decode_invalid_type(::Type{T}, enc::$E) where {T <: Tuple}
+            return tuple_decode_invalid_type(T, enc)
+        end
+        @inline function codec_encode_invalid_type(::Type{T}, enc::$E) where {T <: Tuple}
+            return tuple_encode_invalid_type(T, enc)
         end
     end
 end
@@ -66,6 +78,14 @@ end
     return tuple_body(T, Fs -> (:(add_sizes($((:(max_encoded_size($F, enc)) for F in Fs)...))),))
 end
 
+@generated function tuple_decode_invalid_type(::Type{T}, enc::Endianness) where {T}
+    return tuple_body(T, Fs -> (:(Union{$((:(decode_invalid_type($F, enc)) for F in Fs)...)}),))
+end
+
+@generated function tuple_encode_invalid_type(::Type{T}, enc::Endianness) where {T}
+    return tuple_body(T, Fs -> (:(Union{$((:(encode_invalid_type($F, enc)) for F in Fs)...)}),))
+end
+
 # A tuple with an unbounded element is unbounded
 @inline add_sizes(ns::Int...) = +(ns...)
 @inline add_sizes(::Union{Int, Unbounded}...) = Unbounded()
@@ -86,8 +106,11 @@ end
             [
                 :($(inputs[1]) = input);
                 [
-                    :(($(xs[i]), $(ns[i]), $(inputs[i + 1])) = @? decode_field($(inputs[i]), $F, enc))
-                        for (i, F) in enumerate(Fs)
+                    :(
+                        ($(xs[i]), $(ns[i]), $(inputs[i + 1])) = @? widen_decode_invalid(
+                            decode_field($(inputs[i]), $F, enc), codec_try_decode, T, enc
+                        )
+                    ) for (i, F) in enumerate(Fs)
                 ];
                 :(return (tuple($(xs...)), +($(ns...))))
             ]
@@ -105,8 +128,11 @@ end
             [
                 :($(outputs[1]) = output);
                 [
-                    :(($(ns[i]), $(outputs[i + 1])) = @? encode_field($(outputs[i]), x[$i], enc))
-                        for i in eachindex(Fs)
+                    :(
+                        ($(ns[i]), $(outputs[i + 1])) = @? widen_encode_invalid(
+                            encode_field($(outputs[i]), x[$i], enc), codec_try_encode!, $x, enc
+                        )
+                    ) for i in eachindex(Fs)
                 ];
                 :(return +($(ns...)))
             ]

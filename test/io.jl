@@ -13,7 +13,7 @@
     catch e
         e
     end
-    @test err === DecodeError(EndOfInput)
+    @test err == DecodeError(EndOfInput)
 
     # Values straddling fills
     data = collect(UInt8, 1:64)
@@ -108,5 +108,5 @@ end
     v = zeros(UInt8, 3)
     @test encode_pair!(MemoryView(v), 0x01, 0x0203) === 3
     @test v == [0x01, 0x02, 0x03]
-    @test encode_pair!(MemoryView(zeros(UInt8, 2)), 0x01, 0x0203) === EncodeError(InsufficientSpace)
+    @test encode_pair!(MemoryView(zeros(UInt8, 2)), 0x01, 0x0203) == EncodeError(InsufficientSpace)
 end
