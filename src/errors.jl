@@ -88,7 +88,8 @@ kind is `InvalidData`, else `nothing`. `DecodeError{P}(kind)` is the same, with 
 
 Two `DecodeError`s are `==` if their kinds and payloads are, whatever their types. So
 `err == DecodeError(EndOfInput)` tells if an error of any type is a clean end of input,
-and `err.payload == Some(Overflow)` if the data is invalid because of an overflow.
+and `err == DecodeError(InvalidData, Some(Overflow))` if the data is invalid because of
+an overflow.
 
 Functions prefixed with `try_` return a `DecodeError` instead of throwing it.
 The functions without the prefix throw the same value.
@@ -135,8 +136,23 @@ Base.show(io::IO, err::DecodeError{P}) where {P} = show_error(io, err, DecodeErr
 
 # Errors are equal if their kinds and payloads are, whatever their payload types. So
 # `err == DecodeError(EndOfInput)` holds for errors of any type that are at the end of input.
-Base.:(==)(a::DecodeError, b::DecodeError) = a.kind === b.kind && isequal(a.payload, b.payload)
-Base.hash(x::DecodeError, h::UInt) = hash(x.payload, hash(x.kind, hash(DecodeError, h)))
+Base.:(==)(a::DecodeError, b::DecodeError) = a.kind === b.kind && payload_isequal(a.payload, b.payload)
+Base.hash(x::DecodeError, h::UInt) = payload_hash(x.payload, hash(x.kind, hash(DecodeError, h)))
+
+# Compare and hash payloads by their values, not their types. Before Julia 1.12,
+# `isequal(Some{Union{Nothing, Int}}(1), Some(1))` is `false`, since `Some` has no
+# `isequal` or `hash` method there, so `isequal` on the payloads directly would be too
+# strict.
+function payload_isequal(a::Union{Nothing, Some}, b::Union{Nothing, Some})
+    a === nothing && return b === nothing
+    b === nothing && return false
+    return isequal(something(a), something(b))
+end
+
+function payload_hash(payload::Union{Nothing, Some}, h::UInt)
+    payload === nothing && return hash(nothing, h)
+    return hash(something(payload), hash(Some, h))
+end
 
 function Base.showerror(io::IO, err::DecodeError)
     kind = err.kind
@@ -294,8 +310,8 @@ EncodeError(kind::EncodeErrorKind, payload::Some{P}) where {P} = EncodeError{P}(
 Base.show(io::IO, err::EncodeError{P}) where {P} = show_error(io, err, EncodeError, P)
 
 # As for `DecodeError`
-Base.:(==)(a::EncodeError, b::EncodeError) = a.kind === b.kind && isequal(a.payload, b.payload)
-Base.hash(x::EncodeError, h::UInt) = hash(x.payload, hash(x.kind, hash(EncodeError, h)))
+Base.:(==)(a::EncodeError, b::EncodeError) = a.kind === b.kind && payload_isequal(a.payload, b.payload)
+Base.hash(x::EncodeError, h::UInt) = payload_hash(x.payload, hash(x.kind, hash(EncodeError, h)))
 
 function Base.showerror(io::IO, err::EncodeError)
     kind = err.kind

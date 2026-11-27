@@ -5,14 +5,14 @@
 [![Documentation](https://img.shields.io/badge/docs-dev-blue.svg)](https://biojulia.github.io/Inscription.jl/dev)
 [![](https://codecov.io/gh/BioJulia/Inscription.jl/branch/master/graph/badge.svg)](https://codecov.io/gh/BioJulia/Inscription.jl)
 
-Inscription.jl provides abstractions for reading and writing values to byte arrays (via [MemoryViews.jl](https://github.com/BioJulia/MemoryViews.jl)) or to I/O (via [BufferIO.jl](https://github.com/BioJulia/BufferIO.jl)).
+Inscription.jl provides fast, zero-allocation abstractions for reading and writing values to byte arrays (via [MemoryViews.jl](https://github.com/BioJulia/MemoryViews.jl)) or to I/O (via [BufferIO.jl](https://github.com/BioJulia/BufferIO.jl)).
 
-It can be considered a more powerful version of Base's `read(::IO, T)`, `write(::IO, ::T)` as well as `unsafe_load`/`unsafe_store!`.
-Alternatively, it can be viewed as an extension of BufferIO.jl, which only supports IO on bytes, to support IO for all types.
+It can be considered a more powerful version of Base's `read(::IO, T)`, `write(::IO, ::T)`, or a safer `unsafe_load`/`unsafe_store!`.
+Alternatively, it can be viewed as an extension that allows writing arbitrary values of any type into the buffers provided by BufferIO.jl.
 
 You might want to use this package if you find yourself:
 * Using `unsafe_load`, `unsafe_store!` a lot,
-* Care about how much `write(::IO, ::Float32)` allocates,
+* Care about how much `write(::IO, ::Float32)` allocates or the speed of `print(::IO, ::Int32)` is,
 * Find yourself writing non-`UInt8` data into `Vector{UInt8}`s for IO performance reasons.
 
 You probably don't need this package if:

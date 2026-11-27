@@ -38,7 +38,7 @@ Since a failed load consumes nothing, the second try reads the same bytes:
 
 ```julia
 x = try_load(io, UInt8, Decimal())
-if x isa DecodeError && x.payload == Some(Overflow)
+if x isa DecodeError && x == DecodeError(InvalidData, Some(Overflow))
     x = try_load(io, UInt16, Decimal())
 end
 ```
