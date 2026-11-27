@@ -18,7 +18,7 @@
                 elseif expected[2] == len - i + 1
                     expected[1]
                 else
-                    BitScribbling.decode_error(T, e, TrailingData)
+                    Inscription.decode_error(T, e, TrailingData)
                 end
                 @test isequal(try_decode_exact(mem, i, T, e), exact)
                 @test isequal(try_decode_exact(mem[i:end], T, e), exact)

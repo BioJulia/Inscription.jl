@@ -42,27 +42,27 @@ for (mod, E, desc) in (
     doc = """
         module $mod
 
-    The functions of BitScribbling, with the encoding fixed to `$E()`.
-    Every function forwards to the function of the same name in BitScribbling,
+    The functions of Inscription, with the encoding fixed to `$E()`.
+    Every function forwards to the function of the same name in Inscription,
     with `$E()` as the last argument.
 
-    The module also exports various other names, so that `using BitScribbling.$mod`
+    The module also exports various other names, so that `using Inscription.$mod`
     is all that is needed to use it.
 
     # Examples
     ```julia
-    using BitScribbling.$mod: load, store
+    using Inscription.$mod: load, store
 
     load(io, UInt32) # loads a $desc UInt32
     ```
     """
     m = @eval begin
         @doc $doc module $mod
-        using ..BitScribbling: BitScribbling, $E, MemoryView, MutableMemoryView,
+        using ..Inscription: Inscription, $E, MemoryView, MutableMemoryView,
             AbstractBufReader, AbstractBufWriter,
             DecodeError, DecodeErrorKinds, EncodeError, EncodeErrorKinds, @?
 
-        export BitScribbling, $(names...), DecodeError, DecodeErrorKinds, EncodeError, EncodeErrorKinds, @?
+        export Inscription, $(names...), DecodeError, DecodeErrorKinds, EncodeError, EncodeErrorKinds, @?
         end
     end
     for (f, args) in convenience_functions
@@ -71,8 +71,8 @@ for (mod, E, desc) in (
         fdoc = """
             $mod.$f($signature)
 
-        Forward to [`BitScribbling.$f`](@ref) with `$E()` as the encoding.
+        Forward to [`Inscription.$f`](@ref) with `$E()` as the encoding.
         """
-        Core.eval(m, :(@doc $fdoc Base.@propagate_inbounds $f($(args...)) = BitScribbling.$f($(arg_names...), $E())))
+        Core.eval(m, :(@doc $fdoc Base.@propagate_inbounds $f($(args...)) = Inscription.$f($(arg_names...), $E())))
     end
 end

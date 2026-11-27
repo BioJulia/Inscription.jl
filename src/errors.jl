@@ -51,8 +51,8 @@ module DecodeErrorKinds
 
     A value was decoded, but the input continues after its encoding, where the input
     should hold exactly one encoded value. Only returned or thrown by the functions
-    that decode exactly, such as [`try_decode_exact`](@ref BitScribbling.try_decode_exact)
-    and [`try_load_exact`](@ref BitScribbling.try_load_exact).
+    that decode exactly, such as [`try_decode_exact`](@ref Inscription.try_decode_exact)
+    and [`try_load_exact`](@ref Inscription.try_load_exact).
     """
     TrailingData
 
@@ -228,7 +228,7 @@ module EncodeErrorKinds
 
     The value can't be encoded with the encoding, for example a `Char` that is not in
     an 8-bit character set. Bytes up to the value's
-    [`max_encoded_size`](@ref BitScribbling.max_encoded_size) may have been written.
+    [`max_encoded_size`](@ref Inscription.max_encoded_size) may have been written.
     """
     InvalidValue
 
@@ -271,7 +271,7 @@ See also: [`EncodeErrorKinds.EncodeErrorKind`](@ref), [`@?`](@ref)
 # Examples
 ```jldoctest
 julia> try_encode!(MemoryView(zeros(UInt8, 3)), 0x01020304, BigEndian())
-EncodeError{Union{}}(BitScribbling.EncodeErrorKinds.InsufficientSpace)
+EncodeError{Union{}}(Inscription.EncodeErrorKinds.InsufficientSpace)
 ```
 """
 struct EncodeError{P} <: Exception
@@ -413,7 +413,7 @@ julia> load_pair(BufferIO.CursorReader([0x00, 0x01, 0x00, 0x02]))
 (0x0001, 0x0002)
 
 julia> load_pair(BufferIO.CursorReader([0x00, 0x01, 0x00]))
-DecodeError{Union{}}(BitScribbling.DecodeErrorKinds.Truncated)
+DecodeError{Union{}}(Inscription.DecodeErrorKinds.Truncated)
 ```
 """
 macro var"?"(expr)

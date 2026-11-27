@@ -37,64 +37,64 @@ end
 # The methods, in terms of the types `T` and the encoding `E`
 const OVERLOADS = Dict(
     :try_decode => :(
-        function BitScribbling.try_decode(mem::MemoryView{UInt8}, i::Integer, ::Type{T}, ::E)
+        function Inscription.try_decode(mem::MemoryView{UInt8}, i::Integer, ::Type{T}, ::E)
             result = direct_decode(mem, Int(i))
             return result isa DecodeError ? result : T(result[1])
         end
     ),
     :try_decode_next => :(
-        function BitScribbling.try_decode_next(mem::MemoryView{UInt8}, i::Integer, ::Type{T}, ::E)
+        function Inscription.try_decode_next(mem::MemoryView{UInt8}, i::Integer, ::Type{T}, ::E)
             result = direct_decode(mem, Int(i))
             return result isa DecodeError ? result : (T(result[1]), result[2])
         end
     ),
     :try_encode! => :(
-        function BitScribbling.try_encode!(mem::MutableMemoryView{UInt8}, i::Integer, x::T, ::E)
+        function Inscription.try_encode!(mem::MutableMemoryView{UInt8}, i::Integer, x::T, ::E)
             return direct_encode!(mem, Int(i), x.s)
         end
     ),
     :try_load => :(
-        function BitScribbling.try_load(io::AbstractBufReader, ::Type{T}, ::E)
+        function Inscription.try_load(io::AbstractBufReader, ::Type{T}, ::E)
             result = direct_load(io)
             return result isa DecodeError ? result : T(result[1])
         end
     ),
     :try_load_exact => :(
-        function BitScribbling.try_load_exact(io::AbstractBufReader, n::Integer, ::Type{T}, ::E)
+        function Inscription.try_load_exact(io::AbstractBufReader, n::Integer, ::Type{T}, ::E)
             result = direct_load(io)
             return result isa DecodeError ? result : T(result[1])
         end
     ),
-    :try_store => :(BitScribbling.try_store(io::AbstractBufWriter, x::T, ::E) = direct_store(io, x.s)),
+    :try_store => :(Inscription.try_store(io::AbstractBufWriter, x::T, ::E) = direct_store(io, x.s)),
     :decode => :(
-        function BitScribbling.decode(mem::MemoryView{UInt8}, i::Integer, ::Type{T}, ::E)
+        function Inscription.decode(mem::MemoryView{UInt8}, i::Integer, ::Type{T}, ::E)
             return T(direct_decode(mem, Int(i))[1])
         end
     ),
     :decode_next => :(
-        function BitScribbling.decode_next(mem::MemoryView{UInt8}, i::Integer, ::Type{T}, ::E)
+        function Inscription.decode_next(mem::MemoryView{UInt8}, i::Integer, ::Type{T}, ::E)
             (s, next) = direct_decode(mem, Int(i))
             return (T(s), next)
         end
     ),
     :try_decode_exact => :(
-        function BitScribbling.try_decode_exact(mem::MemoryView{UInt8}, i::Integer, ::Type{T}, ::E)
+        function Inscription.try_decode_exact(mem::MemoryView{UInt8}, i::Integer, ::Type{T}, ::E)
             return T(direct_decode(mem, Int(i))[1])
         end
     ),
     :decode_exact => :(
-        function BitScribbling.decode_exact(mem::MemoryView{UInt8}, i::Integer, ::Type{T}, ::E)
+        function Inscription.decode_exact(mem::MemoryView{UInt8}, i::Integer, ::Type{T}, ::E)
             return T(direct_decode(mem, Int(i))[1])
         end
     ),
     :encode! => :(
-        function BitScribbling.encode!(mem::MutableMemoryView{UInt8}, i::Integer, x::T, ::E)
+        function Inscription.encode!(mem::MutableMemoryView{UInt8}, i::Integer, x::T, ::E)
             return direct_encode!(mem, Int(i), x.s)
         end
     ),
-    :store => :(BitScribbling.store(io::AbstractBufWriter, x::T, ::E) = direct_store(io, x.s)),
+    :store => :(Inscription.store(io::AbstractBufWriter, x::T, ::E) = direct_store(io, x.s)),
     :decode_all! => :(
-        function BitScribbling.decode_all!(dst::MutableMemoryView{T}, src::MemoryView{UInt8}, ::E)
+        function Inscription.decode_all!(dst::MutableMemoryView{T}, src::MemoryView{UInt8}, ::E)
             (k, i) = (0, 1)
             while k < length(dst)
                 result = direct_decode(src, i)
@@ -107,7 +107,7 @@ const OVERLOADS = Dict(
         end
     ),
     :encode_all! => :(
-        function BitScribbling.encode_all!(dst::MutableMemoryView{UInt8}, src::MemoryView{T}, ::E)
+        function Inscription.encode_all!(dst::MutableMemoryView{UInt8}, src::MemoryView{T}, ::E)
             n = 0
             for k in eachindex(src)
                 result = direct_encode!(dst, n + 1, src[k].s)
@@ -118,7 +118,7 @@ const OVERLOADS = Dict(
         end
     ),
     :load_into! => :(
-        function BitScribbling.load_into!(io::AbstractBufReader, dst::MutableMemoryView{T}, ::E)
+        function Inscription.load_into!(io::AbstractBufReader, dst::MutableMemoryView{T}, ::E)
             isempty(dst) && return (0, 0)
             result = direct_load(io)
             result isa DecodeError && return (0, 0)
@@ -127,7 +127,7 @@ const OVERLOADS = Dict(
         end
     ),
     :store_into => :(
-        function BitScribbling.store_into(io::AbstractBufWriter, src::MemoryView{T}, ::E)
+        function Inscription.store_into(io::AbstractBufWriter, src::MemoryView{T}, ::E)
             isempty(src) && return (0, 0)
             n = direct_store(io, src[1].s)
             return n isa EncodeError ? (0, 0) : (1, n)
@@ -297,16 +297,16 @@ end
 # Methods that return the counts in `BAD_COUNTS`
 struct BadCounts <: Encoding end
 const BAD_COUNTS = Ref((0, 0))
-BitScribbling.load_into!(::AbstractBufReader, ::MutableMemoryView{Over{()}}, ::BadCounts) = BAD_COUNTS[]
-BitScribbling.store_into(::AbstractBufWriter, ::MemoryView{Over{()}}, ::BadCounts) = BAD_COUNTS[]
-BitScribbling.decode_all!(::MutableMemoryView{Over{()}}, ::MemoryView{UInt8}, ::BadCounts) = BAD_COUNTS[]
-BitScribbling.encode_all!(::MutableMemoryView{UInt8}, ::MemoryView{Over{()}}, ::BadCounts) = BAD_COUNTS[]
+Inscription.load_into!(::AbstractBufReader, ::MutableMemoryView{Over{()}}, ::BadCounts) = BAD_COUNTS[]
+Inscription.store_into(::AbstractBufWriter, ::MemoryView{Over{()}}, ::BadCounts) = BAD_COUNTS[]
+Inscription.decode_all!(::MutableMemoryView{Over{()}}, ::MemoryView{UInt8}, ::BadCounts) = BAD_COUNTS[]
+Inscription.encode_all!(::MutableMemoryView{UInt8}, ::MemoryView{Over{()}}, ::BadCounts) = BAD_COUNTS[]
 # With a codec, `store_into` uses `encode_all!`
-BitScribbling.codec_max_encoded_size(::Type{Over{()}}, ::BadCounts) = Val(4)
+Inscription.codec_max_encoded_size(::Type{Over{()}}, ::BadCounts) = Val(4)
 # `load_into!` loads nothing, but `try_load` does
 struct LoadsAnyway <: Encoding end
-BitScribbling.load_into!(::AbstractBufReader, ::MutableMemoryView{Over{()}}, ::LoadsAnyway) = (0, 0)
-BitScribbling.try_load(::AbstractBufReader, ::Type{Over{()}}, ::LoadsAnyway) = Over{()}("")
+Inscription.load_into!(::AbstractBufReader, ::MutableMemoryView{Over{()}}, ::LoadsAnyway) = (0, 0)
+Inscription.try_load(::AbstractBufReader, ::Type{Over{()}}, ::LoadsAnyway) = Over{()}("")
 
 @testset "Overloading: counts are checked" begin
     e = BadCounts()
@@ -336,9 +336,9 @@ end
 struct Fast
     x::UInt8
 end
-BitScribbling.codec_scheme(::Type{Fast}, ::Endianness) = BitsLoadable()
+Inscription.codec_scheme(::Type{Fast}, ::Endianness) = BitsLoadable()
 const FAST_CALLS = Ref(0)
-function BitScribbling.load_into!(io::AbstractBufReader, dst::MutableMemoryView{Fast}, ::BigEndian)
+function Inscription.load_into!(io::AbstractBufReader, dst::MutableMemoryView{Fast}, ::BigEndian)
     FAST_CALLS[] += 1
     (isempty(dst) || eof(io)) && return (0, 0)
     dst[1] = Fast(read(io, UInt8))

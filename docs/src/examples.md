@@ -6,7 +6,7 @@ are not unsafe.
 
 ```jldoctest
 using BufferIO: CursorReader, VecWriter
-using BitScribbling.Little # little endian encodings/decodings
+using Inscription.Little # little endian encodings/decodings
 
 mem = collect(b"abcdefgh")
 rdr = CursorReader(mem)
@@ -44,7 +44,7 @@ This may be more efficient than the scalar operations above done in a loop.
 
 ```jldoctest
 using BufferIO: CursorReader, VecWriter
-using BitScribbling.Little # little endian encodings/decodings
+using Inscription.Little # little endian encodings/decodings
 
 u8s = rand(UInt8, 128)
 f32s = rand(Float32, 32)
@@ -82,7 +82,7 @@ then decode from the buffer with `@inbounds`, for maximal efficiency.
 
 ```jldoctest
 using BufferIO: AbstractBufReader, get_nonempty_buffer, consume, CursorReader
-using BitScribbling.Little # little endian encodings/decodings
+using Inscription.Little # little endian encodings/decodings
 using MemoryViews: ImmutableMemoryView
 
 struct Header
@@ -130,18 +130,18 @@ Header((0x00, 0x01), 0x02, 0x03, 0x07060504, 0x08, 0x09, 0x0b0a)
 ```
 
 ## Reading and writing custom types
-BitScribbling.jl requires you to opt in to reading or writing a struct.
+Inscription.jl requires you to opt in to reading or writing a struct.
 In the following examples, I'll demonstrate how to do so. I'll begin with structs that are easy to read/write, and each example will choose a type that has more complications when reading/writing than the previous one.
 
 
 ### Custom struct 1: Entirely transparent (`BitsLoadable`)
 This type has no padding, all bit patterns are valid, and its encoding is the same as its constituent bytes.
 So, it can be read and written via pointer operations.
-We can make BitScribbling use those by opting into the `BitsLoadable` trait.
+We can make Inscription use those by opting into the `BitsLoadable` trait.
 This will automatically make all reading and writing methods work.
 
 ```jldoctest
-using BitScribbling.Little
+using Inscription.Little
 using BufferIO: CursorReader
 
 struct Point2D
@@ -150,8 +150,8 @@ struct Point2D
 end
 
 # Just opt into this trait
-function BitScribbling.codec_scheme(::Type{Point2D}, ::BitScribbling.Endianness)
-    BitScribbling.BitsLoadable()
+function Inscription.codec_scheme(::Type{Point2D}, ::Inscription.Endianness)
+    Inscription.BitsLoadable()
 end
 
 # Now all writer and reader functions work for big endian and little endian
@@ -171,7 +171,7 @@ That means it can be read and written via pointer ops, but read instances must b
 We can do that by opting into the `BitsStorable` trait, and implementing the validation function `validate_bits`, which returns `nothing` for valid bytes, and `Invalid()` otherwise:
 
 ```jldoctest
-using BitScribbling.Little
+using Inscription.Little
 using BufferIO: CursorReader
 
 struct EvenInteger
@@ -180,15 +180,15 @@ struct EvenInteger
     EvenInteger(x::Int64) = isodd(x) ? throw(ArgumentError("nope!")) : new(x)
 end
 
-function BitScribbling.codec_scheme(::Type{EvenInteger}, ::BitScribbling.Endianness)
-    BitScribbling.BitsStorable()
+function Inscription.codec_scheme(::Type{EvenInteger}, ::Inscription.Endianness)
+    Inscription.BitsStorable()
 end
 
-function BitScribbling.validate_bits(::Type{EvenInteger}, bytes::NTuple{8, UInt8})
+function Inscription.validate_bits(::Type{EvenInteger}, bytes::NTuple{8, UInt8})
     # Validate the bytes are those of an even integer. Here, I choose to use
     # the helper function as_unsigned
-    u64 = BitScribbling.as_unsigned(bytes)
-    iseven(u64) ? nothing : BitScribbling.Invalid()
+    u64 = Inscription.as_unsigned(bytes)
+    iseven(u64) ? nothing : Inscription.Invalid()
 end
 
 # Now all writer and reader functions work for big endian and little endian
@@ -202,14 +202,14 @@ EvenInteger(3761688987579986996)
 ```
 
 ### Custom struct 3: Forward to an existing encoding (`Proxy`)
-This type has padding and so cannot be pointer-loadable. However, we can declare it can be read and written like an equivalent `Tuple` (which is special-cased by BitScribbling.jl to ignore padding).
+This type has padding and so cannot be pointer-loadable. However, we can declare it can be read and written like an equivalent `Tuple` (which is special-cased by Inscription.jl to ignore padding).
 We implement the `Proxy` codec scheme and convert to/from that tuple.
 
 An odd-sized primitive, such as a 17-bit integer, could use the same mechanism:
 Load a 32-bit integer, and check the unused 15 bits are zeroed out in `try_from_proxy`.
 
 ```jldoctest
-using BitScribbling.Little
+using Inscription.Little
 using BufferIO: CursorReader
 
 struct Padded
@@ -218,16 +218,16 @@ struct Padded
     # N.B: 7 bytes of padding
 end
 
-function BitScribbling.codec_scheme(::Type{Padded}, ::BitScribbling.Endianness)
-    BitScribbling.Proxy{Tuple{UInt64, UInt8}}()
+function Inscription.codec_scheme(::Type{Padded}, ::Inscription.Endianness)
+    Inscription.Proxy{Tuple{UInt64, UInt8}}()
 end
 
-BitScribbling.try_to_proxy(x::Padded, ::BitScribbling.Endianness) = (x.a, x.b)
+Inscription.try_to_proxy(x::Padded, ::Inscription.Endianness) = (x.a, x.b)
 
-function BitScribbling.try_from_proxy(
+function Inscription.try_from_proxy(
         ::Type{Padded},
         x::Tuple{UInt64, UInt8},
-        ::BitScribbling.Endianness
+        ::Inscription.Endianness
     )
     Padded(x[1], x[2])
 end
@@ -249,7 +249,7 @@ Note that while `UInt32` in little/big endian encoding **is** pointer-readable/w
 Note that this example needs to define a new `Encoding`, and can't simply be `LittleEndian`, as that means storing `UInt32` as binary data.
 
 ```jldoctest
-using BitScribbling: BitScribbling, Encoding, decode, encode!, @?
+using Inscription: Inscription, Encoding, decode, encode!, @?
 
 struct LowerCaseHexadecimal <: Encoding end
 
@@ -270,13 +270,13 @@ end
 # `codec_scheme(UInt32, ::LowerCaseHexadecimal)` defaults to `Manual`,
 # and needs three methods to make reading and writing work; implemented below
 
-function BitScribbling.codec_max_encoded_size(::Type{UInt32}, ::LowerCaseHexadecimal)
+function Inscription.codec_max_encoded_size(::Type{UInt32}, ::LowerCaseHexadecimal)
     Val{8}() # Always 8 bytes, hence that's its max
 end
 
-function BitScribbling.codec_try_decode(
+function Inscription.codec_try_decode(
         # This type wraps the input memory, or the input reader
-        input::BitScribbling.DecodeInput,
+        input::Inscription.DecodeInput,
         ::Type{UInt32},
         ::LowerCaseHexadecimal
     )
@@ -287,27 +287,27 @@ function BitScribbling.codec_try_decode(
     # So, the line below means: Get me 8 bytes, or return `TooShort()` from
     # this function if not available. The latter signals that we need more
     # bytes to decode a UInt32 in hexadecimal
-    bytes = @? BitScribbling.require_bytes(input, 8)
+    bytes = @? Inscription.require_bytes(input, 8)
     # 8 hexadecimal digits are 32 bits, so this can't overflow
     result = UInt32(0)
     # `@inbounds` is safe here because `require_bytes` guarantees exactly
     # 8 bytes.
     @inbounds for i in 1:8
         byte = bytes[i]
-        digit = @something try_hex_digit(byte) return BitScribbling.Invalid()
+        digit = @something try_hex_digit(byte) return Inscription.Invalid()
         result = (result << 4) | digit
     end
     # Return (value, n bytes read)
     return (result, 8)
 end
 
-function BitScribbling.codec_try_encode!(
-        output::BitScribbling.EncodeOutput,
+function Inscription.codec_try_encode!(
+        output::Inscription.EncodeOutput,
         x::UInt32,
         ::LowerCaseHexadecimal
     )
     # `reserve_bytes` is the same as `require_bytes` above, but for `EncodeOutput`
-    bytes = @? BitScribbling.reserve_bytes(output, 8)
+    bytes = @? Inscription.reserve_bytes(output, 8)
     @inbounds for i in 8:-1:1
         (x, r) = divrem(x, UInt32(16))
         bytes[i] = to_hex_digit(r)
@@ -336,23 +336,23 @@ can e.g. try again with a wider integer type. The type of the payloads is declar
 `codec_decode_invalid_type`, and the payload of the `DecodeError` is `Some(Overflow)` or `Some(NoDigits)`.
 
 ```jldoctest
-using BitScribbling: BitScribbling, Encoding, DecodeError, load, store, try_load, @?
+using Inscription: Inscription, Encoding, DecodeError, load, store, try_load, @?
 using BufferIO: CursorReader, VecWriter
 
 struct ASCIIDecimal <: Encoding end
 
 @enum ParseError::UInt8 NoDigits Overflow
 
-BitScribbling.codec_decode_invalid_type(::Type{UInt32}, ::ASCIIDecimal) = ParseError
+Inscription.codec_decode_invalid_type(::Type{UInt32}, ::ASCIIDecimal) = ParseError
 
-function BitScribbling.codec_max_encoded_size(::Type{UInt32}, ::ASCIIDecimal)
+function Inscription.codec_max_encoded_size(::Type{UInt32}, ::ASCIIDecimal)
     # If the encoding had disallowed leading zeros, this could have been
     # Val{10}(), the maximal length of UInt32 in decimal.
-    BitScribbling.Unbounded()
+    Inscription.Unbounded()
 end
 
-function BitScribbling.codec_try_decode(
-        input::BitScribbling.DecodeInput,
+function Inscription.codec_try_decode(
+        input::Inscription.DecodeInput,
         ::Type{UInt32},
         ::ASCIIDecimal
     )
@@ -363,25 +363,25 @@ function BitScribbling.codec_try_decode(
         # before it. When loading from a reader, it buffers more bytes if
         # needed. It can also return `TooShort()`, which the `@?` macro
         # returns early, if the bytes are only the start of the input.
-        byte = @? BitScribbling.peek_byte(input, n_bytes_read + 1)
+        byte = @? Inscription.peek_byte(input, n_bytes_read + 1)
         # Stop at the end of the input, or the first byte that isn't a digit
         (byte !== nothing && in(byte, 0x30:0x39)) || break
         value = value * 10 + (byte - 0x30)
-        value > typemax(UInt32) && return BitScribbling.Invalid(Overflow)
+        value > typemax(UInt32) && return Inscription.Invalid(Overflow)
         n_bytes_read += 1
     end
-    iszero(n_bytes_read) && return BitScribbling.Invalid(NoDigits)
+    iszero(n_bytes_read) && return Inscription.Invalid(NoDigits)
     return (value % UInt32, n_bytes_read)
 end
 
 # This is easier, since we always encode without leading zeros
-function BitScribbling.codec_try_encode!(
-        output::BitScribbling.EncodeOutput,
+function Inscription.codec_try_encode!(
+        output::Inscription.EncodeOutput,
         x::UInt32,
         ::ASCIIDecimal
     )
     nd = ndigits(x)
-    mem = @? BitScribbling.reserve_bytes(output, nd)
+    mem = @? Inscription.reserve_bytes(output, nd)
     for i in nd:-1:1
         (x, r) = divrem(x, UInt32(10))
         @inbounds mem[i] = (r + 0x30) % UInt8

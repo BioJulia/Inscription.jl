@@ -1,10 +1,10 @@
 """
-    module BitScribbling
+    module Inscription
 
 Encode and decode values, such as integers, floats, `Char`, structs
 to and from byte arrays and BufferIO's I/O types.
 """
-module BitScribbling
+module Inscription
 
 using MemoryViews: MemoryViews, MemoryView, ImmutableMemoryView, MutableMemoryView, split_at
 using LightBoundsErrors: throw_lightboundserror
@@ -98,4 +98,4 @@ include("bulk.jl")
 include("memory.jl")
 include("convenience.jl")
 
-end # module BitScribbling
+end # module Inscription

@@ -1,11 +1,11 @@
 # AGENTS.md
-This file provide guidance for coding agents working on the BitScribbling.jl repository.
+This file provide guidance for coding agents working on the Inscription.jl repository.
 
-BitScribbling is a Julia package that provides abstractions for reading and writing values, such as integers, floats, `Char` and structs (`isbits` or not), to and from memory, and to and from the reader and writer types of the BufferIO package.
+Inscription is a Julia package that provides abstractions for reading and writing values, such as integers, floats, `Char` and structs (`isbits` or not), to and from memory, and to and from the reader and writer types of the BufferIO package.
 
 The major design goals of this package are:
-1. High performance. The abstractions of this package should be roughly on par with manual implementations using pointer operations and `reinterpret`. Users should rarely be discouraged from using BitScribbling abstractions due to performance.
-2. Present a hard-to-misuse API. BitScribbling APIs avoid making important behaviour implicit, such as platform endianness, platform-dependent struct padding, or performance traps due to slow fallback definitions. It attempts to guide users away from bugs.
+1. High performance. The abstractions of this package should be roughly on par with manual implementations using pointer operations and `reinterpret`. Users should rarely be discouraged from using Inscription abstractions due to performance.
+2. Present a hard-to-misuse API. Inscription APIs avoid making important behaviour implicit, such as platform endianness, platform-dependent struct padding, or performance traps due to slow fallback definitions. It attempts to guide users away from bugs.
 
 Explicit **non**-goals of this package are:
 1. A simple API. This package prefers semantically consistent, precise, efficient, and hard-to-misuse APIs over easy APIs.

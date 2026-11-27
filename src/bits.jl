@@ -24,9 +24,9 @@ to convert `bytes` to an `Unsigned` integer in native byte order.
 # Examples
 ```julia
 primitive type Odd64 64 end
-BitScribbling.codec_scheme(::Type{Odd64}, ::Endianness) = BitScribbling.BitsStorable()
-function BitScribbling.validate_bits(::Type{Odd64}, bytes::NTuple{8, UInt8})
-    return isodd(BitScribbling.as_unsigned(bytes)) ? nothing : BitScribbling.Invalid()
+Inscription.codec_scheme(::Type{Odd64}, ::Endianness) = Inscription.BitsStorable()
+function Inscription.validate_bits(::Type{Odd64}, bytes::NTuple{8, UInt8})
+    return isodd(Inscription.as_unsigned(bytes)) ? nothing : Inscription.Invalid()
 end
 ```
 """
@@ -92,7 +92,7 @@ julia> x = 0x00ab_cdef;
 
 julia> bytes = NATIVE_ENDIAN === LittleEndian() ? (0xef, 0xcd, 0xab) : (0xab, 0xcd, 0xef);
 
-julia> BitScribbling.as_unsigned(bytes) === x
+julia> Inscription.as_unsigned(bytes) === x
 true
 ```
 """
@@ -279,13 +279,13 @@ julia> struct Unordered; a::UInt32; b::UInt64; end
 
 julia> struct Ordered; b::UInt64; a::UInt32; c::UInt32; end
 
-julia> BitScribbling.is_padding_free(Unordered)
+julia> Inscription.is_padding_free(Unordered)
 false
 
-julia> BitScribbling.is_padding_free(Ordered)
+julia> Inscription.is_padding_free(Ordered)
 true
 
-julia> BitScribbling.is_padding_free(Tuple{UInt16, Tuple{UInt8, UInt8}})
+julia> Inscription.is_padding_free(Tuple{UInt16, Tuple{UInt8, UInt8}})
 true
 ```
 

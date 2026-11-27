@@ -1,17 +1,17 @@
-# Reading and writing with BitScribbling.jl
+# Reading and writing with Inscription.jl
 Reading and writing happens fundamentally via encoding into and decoding from MemoryViews.jl's `MemoryView` type.
 Loading from and storing to BufferIO.jl's `AbstractBufReader` and `AbstractBufWriter` works via encoding and decoding from memory views into their buffers.
 
-When loading and storing from BufferIO I/O types, you can always manually request their buffer, encode into/decode from the buffer, then call `BufferIO.consume`. This can be used as an escape hatch to load and store types not easily handled by BitScribbling.jl, such as bit-packed types (see the [Implementing a type](custom.md) page).
+When loading and storing from BufferIO I/O types, you can always manually request their buffer, encode into/decode from the buffer, then call `BufferIO.consume`. This can be used as an escape hatch to load and store types not easily handled by Inscription.jl, such as bit-packed types (see the [Implementing a type](custom.md) page).
 It can also be used in extremely performance-sensitive situations when you can request a large buffer, do a single boundscheck, then load many values inbounds.
-However, most users should just use the BitScribbling functions below, as they are usually fast enough, and cover most use cases.
+However, most users should just use the Inscription functions below, as they are usually fast enough, and cover most use cases.
 
 ## Endian convenience namespaces
 A given format is typically only little-endian or big-endian. When working with exclusively little-endian data, it's annoying to have to pass `LittleEndian()` as the `Encoding` to all functions.
-BitScribbling provides the modules `BitScribbling.Little` and `BitScribbling.Big`, which export convenience functions that automatically forward `LittleEndian()` and `BigEndian()`, such that e.g.:
+Inscription provides the modules `Inscription.Little` and `Inscription.Big`, which export convenience functions that automatically forward `LittleEndian()` and `BigEndian()`, such that e.g.:
 
 ```julia
-using BitScribbling.Little: encode!
+using Inscription.Little: encode!
 
 encode!(mem, UInt32(123))
 ```
@@ -19,7 +19,7 @@ encode!(mem, UInt32(123))
 Is shorthand for:
 
 ```julia
-using BitScribbling: encode!
+using Inscription: encode!
 
 encode!(mem, UInt32(123), LittleEndian())
 ```
@@ -54,7 +54,7 @@ If `i` is omitted, it defaults to `1`.
 
 Example: `encode!(zeros(UInt8, 4), UInt32(55), LittleEndian()) === 4`
 
-To find the number of bytes a value `x` takes up in some encoding, encode it: `try_encode!` returns the number of bytes written. To only find the size, encode `x` into scratch memory of [`max_encoded_size`](@ref) bytes, and reuse the same scratch memory for many values, rather than allocating it for each. If `max_encoded_size` is [`BitScribbling.Unbounded`](@ref), there is no such size, so [`store`](@ref) `x` into a `BufferIO.VecWriter`, which grows as needed, instead. There is no function that gives the size without encoding, since it would duplicate the codec, and could disagree with it.
+To find the number of bytes a value `x` takes up in some encoding, encode it: `try_encode!` returns the number of bytes written. To only find the size, encode `x` into scratch memory of [`max_encoded_size`](@ref) bytes, and reuse the same scratch memory for many values, rather than allocating it for each. If `max_encoded_size` is [`Inscription.Unbounded`](@ref), there is no such size, so [`store`](@ref) `x` into a `BufferIO.VecWriter`, which grows as needed, instead. There is no function that gives the size without encoding, since it would duplicate the codec, and could disagree with it.
 
 ### Decoding values
 The decoding signature is generally: `(try_)decode(_exact,_next)(mem, [i::Integer,] ::Type{T}, enc::Encoding)`, and they mean: Decode a `T` from `mem` starting at position `i`, with the given `Encoding`, and return the `T` (or an error, for the `try_` variant).
@@ -121,8 +121,8 @@ For example, to read 3 `UInt64` from a reader, you may do:
 
 ```julia
 using BufferIO: AbstractBufReader, get_nonempty_buffer, consume
-using BitScribbling: BitScribbling, decode, LittleEndian, DecodeError
-using BitScribbling.DecodeErrorKinds: EndOfInput
+using Inscription: Inscription, decode, LittleEndian, DecodeError
+using Inscription.DecodeErrorKinds: EndOfInput
 
 function get_three_u64(io::AbstractBufReader)
     # Throw a DecodeError if EOF is reached before 24 bytes

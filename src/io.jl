@@ -17,13 +17,13 @@ julia> try_load(io, UInt16, LittleEndian())
 0x0201
 
 julia> try_load(io, UInt16, LittleEndian()) # nothing is consumed
-DecodeError{Union{}}(BitScribbling.DecodeErrorKinds.Truncated)
+DecodeError{Union{}}(Inscription.DecodeErrorKinds.Truncated)
 
 julia> try_load(io, UInt8, LittleEndian())
 0x03
 
 julia> try_load(io, UInt8, LittleEndian())
-DecodeError{Union{}}(BitScribbling.DecodeErrorKinds.EndOfInput)
+DecodeError{Union{}}(Inscription.DecodeErrorKinds.EndOfInput)
 ```
 
 # Extended help
@@ -233,13 +233,13 @@ julia> try_load_exact(io, 2, Char, UTF8())
 'é': Unicode U+00E9 (category Ll: Letter, lowercase)
 
 julia> try_load_exact(io, 2, Char, UTF8()) # 'a' is followed by 'b'
-DecodeError{Union{}}(BitScribbling.DecodeErrorKinds.TrailingData)
+DecodeError{Union{}}(Inscription.DecodeErrorKinds.TrailingData)
 
 julia> try_load_exact(io, 1, Char, UTF8()) # nothing was consumed
 'a': ASCII/Unicode U+0061 (category Ll: Letter, lowercase)
 
 julia> try_load_exact(io, 2, Char, UTF8())
-DecodeError{Union{}}(BitScribbling.DecodeErrorKinds.Truncated)
+DecodeError{Union{}}(Inscription.DecodeErrorKinds.Truncated)
 ```
 """
 @inline function try_load_exact(

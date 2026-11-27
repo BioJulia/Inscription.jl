@@ -191,7 +191,7 @@ end
     @test fieldoffset(WithU256, 2) == 16 && sizeof(WithU256) == 48 || Base.datatype_alignment(U256) == 32
 
     # The padding check is available on its own, independent of the codec scheme
-    is_padding_free = BitScribbling.is_padding_free
+    is_padding_free = Inscription.is_padding_free
     for T in (Ordered, ExplicitPadding, WithU256Aligned, Plain, Header, Tuple{UInt8, UInt8, UInt16}, UInt64, Empty)
         @test is_padding_free(T)
     end

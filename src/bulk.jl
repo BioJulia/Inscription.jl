@@ -340,7 +340,7 @@ julia> load_into!(io, MemoryView(dst), BigEndian())
 (0, 0)
 
 julia> try_load(io, UInt16, BigEndian())
-DecodeError{Union{}}(BitScribbling.DecodeErrorKinds.Truncated)
+DecodeError{Union{}}(Inscription.DecodeErrorKinds.Truncated)
 ```
 """
 function load_into!(

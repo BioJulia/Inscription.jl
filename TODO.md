@@ -4,7 +4,7 @@ Announcement
 
 * Invalid payload?
 
-* Move to BioJulia / BitScribbling.jl
+* Move to BioJulia / Inscription.jl
 * Add a GitHub repo description
 
 * Set up codecov

@@ -9,7 +9,7 @@ or [`LittleEndian`](@ref) the codec can be automatically implemented,
 because the codec is simply loading/storing with a pointer, and maybe byte swapping.
 For such a type `T`, users can declare:
 ```julia
-BitScribbling.codec_scheme(::Type{T}, ::Endianness) = BitScribbling.BitsLoadable()
+Inscription.codec_scheme(::Type{T}, ::Endianness) = Inscription.BitsLoadable()
 ```
 And then the codec T/Endianness is automatically implemented.
 
@@ -162,7 +162,7 @@ The [`CodecScheme`](@ref) of the type `T` with the encoding `enc`. Defaults to
 [`Manual()`](@ref Manual).
 
 Add methods to it for your own types, e.g.
-`BitScribbling.codec_scheme(::Type{MyType}, ::Endianness) = BitScribbling.BitsLoadable()`.
+`Inscription.codec_scheme(::Type{MyType}, ::Endianness) = Inscription.BitsLoadable()`.
 
 Unlike the methods of a hand-written codec, its methods may be defined for abstract
 encoding types, such as `Endianness` or `Encoding`.
@@ -303,7 +303,7 @@ Add a method to it to give the errors of your codec payloads, e.g. for an enum
 `ParseError`:
 
 ```julia
-BitScribbling.codec_decode_invalid_type(::Type{MyInt}, ::Decimal) = ParseError
+Inscription.codec_decode_invalid_type(::Type{MyInt}, ::Decimal) = ParseError
 ```
 
 Return `Union{}` if decoding can't fail. The type is checked when the codec returns an
@@ -368,10 +368,10 @@ Do not add methods to this function. It is derived from the codec scheme of `T`,
 
 # Examples
 ```jldoctest
-julia> BitScribbling.decode_invalid_type(UInt32, LittleEndian())
+julia> Inscription.decode_invalid_type(UInt32, LittleEndian())
 Union{}
 
-julia> BitScribbling.decode_invalid_type(Tuple{Bool, UInt8}, LittleEndian())
+julia> Inscription.decode_invalid_type(Tuple{Bool, UInt8}, LittleEndian())
 Nothing
 ```
 """

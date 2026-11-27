@@ -1,4 +1,4 @@
-using BitScribbling: decode_invalid_type, encode_invalid_type, decode_error
+using Inscription: decode_invalid_type, encode_invalid_type, decode_error
 
 # The errors of decoding or encoding a `T` with `e`, of the type that its functions
 # return. The payload of `Invalid()` is `nothing`.

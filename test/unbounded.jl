@@ -19,9 +19,9 @@ struct Entry
     flag::Bool
 end
 const EntryTuple = Tuple{UInt32, LengthPrefixed, NulTerminated, Bool}
-BitScribbling.codec_scheme(::Type{Entry}, ::Endianness) = Proxy{EntryTuple}()
-BitScribbling.try_to_proxy(x::Entry, ::Endianness) = (x.id, x.name, x.alias, x.flag)
-function BitScribbling.try_from_proxy(::Type{Entry}, t::EntryTuple, ::Endianness)
+Inscription.codec_scheme(::Type{Entry}, ::Endianness) = Proxy{EntryTuple}()
+Inscription.try_to_proxy(x::Entry, ::Endianness) = (x.id, x.name, x.alias, x.flag)
+function Inscription.try_from_proxy(::Type{Entry}, t::EntryTuple, ::Endianness)
     return iszero(t[1]) ? Invalid() : Entry(t...)
 end
 
@@ -33,8 +33,8 @@ end
 
 for E in (LittleEndian, BigEndian)
     @eval begin
-        BitScribbling.codec_max_encoded_size(::Type{NulTerminated}, ::$E) = Unbounded()
-        function BitScribbling.codec_try_decode(input::DecodeInput, ::Type{NulTerminated}, ::$E)
+        Inscription.codec_max_encoded_size(::Type{NulTerminated}, ::$E) = Unbounded()
+        function Inscription.codec_try_decode(input::DecodeInput, ::Type{NulTerminated}, ::$E)
             n = 0
             while true
                 # At the end of the input, the terminator is missing
@@ -46,7 +46,7 @@ for E in (LittleEndian, BigEndian)
             end
             return (NulTerminated(String(@? require_bytes(input, n))), n + 1)
         end
-        function BitScribbling.codec_try_encode!(output::EncodeOutput, x::NulTerminated, ::$E)
+        function Inscription.codec_try_encode!(output::EncodeOutput, x::NulTerminated, ::$E)
             '\0' in x.s && return Invalid()
             n = ncodeunits(x.s)
             mem = @? reserve_bytes(output, n + 1)
@@ -55,13 +55,13 @@ for E in (LittleEndian, BigEndian)
             return n + 1
         end
 
-        BitScribbling.codec_max_encoded_size(::Type{LengthPrefixed}, ::$E) = Unbounded()
-        function BitScribbling.codec_try_decode(input::DecodeInput, ::Type{LengthPrefixed}, e::$E)
+        Inscription.codec_max_encoded_size(::Type{LengthPrefixed}, ::$E) = Unbounded()
+        function Inscription.codec_try_decode(input::DecodeInput, ::Type{LengthPrefixed}, e::$E)
             (len, n, rest) = @? decode_field(input, UInt64, e)
             bytes = @? require_bytes(rest, len)
             return (LengthPrefixed(String(bytes)), n + length(bytes))
         end
-        function BitScribbling.codec_try_encode!(output::EncodeOutput, x::LengthPrefixed, e::$E)
+        function Inscription.codec_try_encode!(output::EncodeOutput, x::LengthPrefixed, e::$E)
             len = ncodeunits(x.s)
             (n, rest) = @? encode_field(output, UInt64(len), e)
             mem = @? reserve_bytes(rest, len)
@@ -69,14 +69,14 @@ for E in (LittleEndian, BigEndian)
             return n + len
         end
 
-        BitScribbling.codec_max_encoded_size(::Type{Node}, ::$E) = Unbounded()
-        function BitScribbling.codec_try_decode(input::DecodeInput, ::Type{Node}, e::$E)
+        Inscription.codec_max_encoded_size(::Type{Node}, ::$E) = Unbounded()
+        function Inscription.codec_try_decode(input::DecodeInput, ::Type{Node}, e::$E)
             ((x, more), n, rest) = @? decode_field(input, Tuple{UInt16, Bool}, e)
             more || return (Node(x, nothing), n)
             (next, m, _) = @? decode_field(rest, Node, e)
             return (Node(x, next), n + m)
         end
-        function BitScribbling.codec_try_encode!(output::EncodeOutput, x::Node, e::$E)
+        function Inscription.codec_try_encode!(output::EncodeOutput, x::Node, e::$E)
             (n, rest) = @? encode_field(output, (x.x, x.next !== nothing), e)
             x.next === nothing && return n
             (m, _) = @? encode_field(rest, x.next, e)
@@ -263,8 +263,8 @@ end
 # Keeps a view across reads that reach no further than an earlier read, which must not
 # invalidate it, see `DecodeInput`
 struct KeepsView <: Encoding end
-BitScribbling.codec_max_encoded_size(::Type{Vector{UInt8}}, ::KeepsView) = Unbounded()
-function BitScribbling.codec_try_decode(input::DecodeInput, ::Type{Vector{UInt8}}, ::KeepsView)
+Inscription.codec_max_encoded_size(::Type{Vector{UInt8}}, ::KeepsView) = Unbounded()
+function Inscription.codec_try_decode(input::DecodeInput, ::Type{Vector{UInt8}}, ::KeepsView)
     (len, n, rest) = @? decode_field(input, UInt8, BigEndian())
     view = @? require_bytes(rest, 4 + Int(len))
     @? require_bytes(input, 3)

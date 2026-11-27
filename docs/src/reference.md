@@ -1,21 +1,21 @@
 # Reference
 ```@autodocs
-Modules = [BitScribbling]
+Modules = [Inscription]
 Order   = [:module, :type, :constant, :macro, :function]
 ```
 
 ## Little and Big
 ```@autodocs
-Modules = [BitScribbling.Little, BitScribbling.Big]
+Modules = [Inscription.Little, Inscription.Big]
 Filter = t -> t isa Module
 ```
 
 ## DecodeErrorKinds
 ```@autodocs
-Modules = [BitScribbling.DecodeErrorKinds]
+Modules = [Inscription.DecodeErrorKinds]
 ```
 
 ## EncodeErrorKinds
 ```@autodocs
-Modules = [BitScribbling.EncodeErrorKinds]
+Modules = [Inscription.EncodeErrorKinds]
 ```

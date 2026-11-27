@@ -7,7 +7,7 @@ and decoded from the encodings.
 
 Thus, reading and writing behaviour is governed by the pair `(T, enc::Encoding)`.
 Such an implementation over a pair is called a "codec".
-BitScribbling's functions like `load`, `store_all`, `decode_every`,
+Inscription's functions like `load`, `store_all`, `decode_every`,
 etc. use the codecs as their inner kernel.
 
 Users are free to define their own `Encoding`s and implement codecs for them.
@@ -115,7 +115,7 @@ struct UTF8 <: Encoding end
 Marker struct that signals an encoding has no, or a large, upper limit on
 number of encoded bytes, e.g. for null-terminated strings.
 
-This signals that when loading from an `AbstractBufReader`, BitScribbling should
+This signals that when loading from an `AbstractBufReader`, Inscription should
 not attempt to buffer the maximal size up front.
 Implemented as `codec_max_encoded_size(::Type{T}, ::SomeEncoding) = Unbounded()`,
 with the encoding typically being `Endianness`.

@@ -1,11 +1,11 @@
-# <img src="./assets/sticker.svg" width="30%" align="right" /> BitScribbling.jl
+# <img src="./assets/sticker.svg" width="30%" align="right" /> Inscription.jl
 
-[![Latest Release](https://img.shields.io/github/release/BioJulia/BitScribbling.jl.svg)](https://github.com/BioJulia/BitScribbling.jl/releases/latest)
-[![MIT license](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/BioJulia/BitScribbling.jl/blob/master/LICENSE)
-[![Documentation](https://img.shields.io/badge/docs-dev-blue.svg)](https://biojulia.github.io/BitScribbling.jl/dev)
-[![](https://codecov.io/gh/BioJulia/BitScribbling.jl/branch/master/graph/badge.svg)](https://codecov.io/gh/BioJulia/BitScribbling.jl)
+[![Latest Release](https://img.shields.io/github/release/BioJulia/Inscription.jl.svg)](https://github.com/BioJulia/Inscription.jl/releases/latest)
+[![MIT license](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/BioJulia/Inscription.jl/blob/master/LICENSE)
+[![Documentation](https://img.shields.io/badge/docs-dev-blue.svg)](https://biojulia.github.io/Inscription.jl/dev)
+[![](https://codecov.io/gh/BioJulia/Inscription.jl/branch/master/graph/badge.svg)](https://codecov.io/gh/BioJulia/Inscription.jl)
 
-BitScribbling.jl provides abstractions for reading and writing values to byte arrays (via [MemoryViews.jl](https://github.com/BioJulia/MemoryViews.jl)) or to I/O (via [BufferIO.jl](https://github.com/BioJulia/BufferIO.jl)).
+Inscription.jl provides abstractions for reading and writing values to byte arrays (via [MemoryViews.jl](https://github.com/BioJulia/MemoryViews.jl)) or to I/O (via [BufferIO.jl](https://github.com/BioJulia/BufferIO.jl)).
 
 It can be considered a more powerful version of Base's `read(::IO, T)`, `write(::IO, ::T)` as well as `unsafe_load`/`unsafe_store!`.
 Alternatively, it can be viewed as an extension of BufferIO.jl, which only supports IO on bytes, to support IO for all types.
@@ -20,8 +20,8 @@ You probably don't need this package if:
 * Read/write specific formats like JSON, in which case you should use a package specific to that format.
 
 The major design goals of this package are:
-1. High performance. The abstractions of this package should be roughly on par with manual implementations using pointer operations and `reinterpret`. Users should rarely be discouraged from using BitScribbling abstractions due to performance.
-2. Present a hard-to-misuse API. BitScribbling APIs avoid making important behaviour implicit, such as platform endianness, platform-dependent struct padding, or performance traps due to slow fallback definitions. It attempts to guide users away from bugs.
+1. High performance. The abstractions of this package should be roughly on par with manual implementations using pointer operations and `reinterpret`. Users should rarely be discouraged from using Inscription abstractions due to performance.
+2. Present a hard-to-misuse API. Inscription APIs avoid making important behaviour implicit, such as platform endianness, platform-dependent struct padding, or performance traps due to slow fallback definitions. It attempts to guide users away from bugs.
 
 Explicit **non**-goals of this package are:
 1. A simple API. This package prefers semantically consistent, precise, efficient, and hard-to-misuse APIs over easy APIs.
@@ -32,7 +32,7 @@ Explicit **non**-goals of this package are:
 ## Example
 ```julia
 # Explicitly opt-into little endian encodings/decodings
-using BufferIO, BitScribbling.Little
+using BufferIO, Inscription.Little
 
 data = UInt8.('a':'z')
 u16s = zeros(UInt16, 50)
@@ -54,9 +54,9 @@ n_u16s_written = encode_all!(data, view(u16s, 1:n_u16s_loaded))
 ```
 
 ## Comparison to other packages
-* **JSON.jl / TOML/jl / BSON/jl**: BitScribbling.jl is lower level, in that it attempts only to read/write individual values, typically `isbits` values. BitScribbling.jl would typically be used to implement binary formats like BSON or BAM.
-* **BufferIO.jl**: models I/O via buffers of bytes (`UInt8`), and is more low level. BitScribbling.jl builds on, and depends on BufferIO.jl, and extends an analogous model of I/O for non-`UInt8` types
-* **Serialization.jl** specifies a specific format, whereas BitScribbling.jl is format agnostic. Also, Serialization.jl works with any Julia type, whereas reading/writing must be implemented per type in BitScribbling.jl's abstractions.
+* **JSON.jl / TOML/jl / BSON/jl**: Inscription.jl is lower level, in that it attempts only to read/write individual values, typically `isbits` values. Inscription.jl would typically be used to implement binary formats like BSON or BAM.
+* **BufferIO.jl**: models I/O via buffers of bytes (`UInt8`), and is more low level. Inscription.jl builds on, and depends on BufferIO.jl, and extends an analogous model of I/O for non-`UInt8` types
+* **Serialization.jl** specifies a specific format, whereas Inscription.jl is format agnostic. Also, Serialization.jl works with any Julia type, whereas reading/writing must be implemented per type in Inscription.jl's abstractions.
 
 ## Contributing
 We appreciate contributions from users including reporting bugs, fixing

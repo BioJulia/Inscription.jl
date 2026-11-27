@@ -58,9 +58,9 @@ end
 @noinline function throw_no_codec_error(::Type{T}, enc::Encoding) where {T}
     throw(
         ArgumentError(
-            "There is no codec for `$T` with `$enc`. To add one, see `BitScribbling.codec_scheme` " *
-                "and `BitScribbling.Encoding`. If you added a method for this type to a function of " *
-                "BitScribbling, then the function you called doesn't use that method."
+            "There is no codec for `$T` with `$enc`. To add one, see `Inscription.codec_scheme` " *
+                "and `Inscription.Encoding`. If you added a method for this type to a function of " *
+                "Inscription, then the function you called doesn't use that method."
         )
     )
 end
@@ -112,10 +112,10 @@ julia> try_decode(MemoryView([0x01, 0x02, 0x03]), 2, UInt16, LittleEndian())
 0x0302
 
 julia> try_decode(MemoryView([0x01]), UInt16, LittleEndian())
-DecodeError{Union{}}(BitScribbling.DecodeErrorKinds.Truncated)
+DecodeError{Union{}}(Inscription.DecodeErrorKinds.Truncated)
 
 julia> try_decode(MemoryView([0x02]), Bool, LittleEndian())
-DecodeError(BitScribbling.DecodeErrorKinds.InvalidData)
+DecodeError(Inscription.DecodeErrorKinds.InvalidData)
 ```
 """
 @inline function try_decode(
@@ -189,7 +189,7 @@ julia> try_decode_next(mem, 2, Char, UTF8())
 ('é', 4)
 
 julia> try_decode_next(mem, 4, Char, UTF8())
-DecodeError{Union{}}(BitScribbling.DecodeErrorKinds.EndOfInput)
+DecodeError{Union{}}(Inscription.DecodeErrorKinds.EndOfInput)
 ```
 """
 @inline function try_decode_next(
@@ -261,13 +261,13 @@ julia> try_decode_exact(MemoryView([0x01, 0x02]), UInt16, BigEndian())
 0x0102
 
 julia> try_decode_exact(MemoryView([0x01, 0x02, 0x03]), UInt16, BigEndian())
-DecodeError{Union{}}(BitScribbling.DecodeErrorKinds.TrailingData)
+DecodeError{Union{}}(Inscription.DecodeErrorKinds.TrailingData)
 
 julia> try_decode_exact(MemoryView([0x01, 0x02, 0x03]), 2, UInt16, BigEndian())
 0x0203
 
 julia> try_decode_exact(MemoryView([0x01]), UInt16, BigEndian())
-DecodeError{Union{}}(BitScribbling.DecodeErrorKinds.Truncated)
+DecodeError{Union{}}(Inscription.DecodeErrorKinds.Truncated)
 ```
 """
 @inline function try_decode_exact(
@@ -452,7 +452,7 @@ julia> try_encode!(MemoryView(v), 2, 0x0304, BigEndian()), v
 (2, UInt8[0x01, 0x03, 0x04])
 
 julia> try_encode!(MemoryView(v), 0x01020304, BigEndian()) # too short
-EncodeError{Union{}}(BitScribbling.EncodeErrorKinds.InsufficientSpace)
+EncodeError{Union{}}(Inscription.EncodeErrorKinds.InsufficientSpace)
 ```
 """
 @inline function try_encode!(
@@ -665,9 +665,9 @@ An implementation must follow this contract:
 For example, for a 24-bit unsigned integer `U24` encoded in 3 bytes:
 
 ```julia
-BitScribbling.codec_max_encoded_size(::Type{U24}, ::BigEndian) = Val(3)
+Inscription.codec_max_encoded_size(::Type{U24}, ::BigEndian) = Val(3)
 
-@inline function BitScribbling.codec_try_decode(input::DecodeInput, ::Type{U24}, ::BigEndian)
+@inline function Inscription.codec_try_decode(input::DecodeInput, ::Type{U24}, ::BigEndian)
     b = @? require_bytes(input, 3)
     # `b` has length 3, so these are in bounds, and their checks are removed
     return (U24((UInt32(b[1]) << 16) | (UInt32(b[2]) << 8) | UInt32(b[3])), 3)
@@ -678,7 +678,7 @@ An encoding whose end is decided by the byte after it looks at that byte with
 `peek_byte`. For example, for the decimal digits of a `UInt8`:
 
 ```julia
-@inline function BitScribbling.codec_try_decode(input::DecodeInput, ::Type{UInt8}, ::Decimal)
+@inline function Inscription.codec_try_decode(input::DecodeInput, ::Type{UInt8}, ::Decimal)
     value = 0
     n = 0
     while n < 3
@@ -902,7 +902,7 @@ An implementation must follow this contract:
 For example, for a 24-bit unsigned integer `struct U24; x::UInt32; end` encoded in 3 bytes:
 
 ```julia
-@inline function BitScribbling.codec_try_encode!(output::EncodeOutput, v::U24, ::BigEndian)
+@inline function Inscription.codec_try_encode!(output::EncodeOutput, v::U24, ::BigEndian)
     mem = @? reserve_bytes(output, 3)
     mem[1] = (v.x >> 16) % UInt8
     mem[2] = (v.x >> 8) % UInt8
