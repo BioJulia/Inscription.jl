@@ -66,10 +66,49 @@ end
 @inline function try_load_sized(
         io::AbstractBufReader, ::Type{T}, enc::Encoding
     )::Union{Tuple{T, Int}, DecodeError} where {T}
+    result = try_load_fast(io, T, enc)
+    result === nothing || return result
+    return @noinline try_load_sized_slow(io, T, enc)
+end
+
+# The fast path of `try_load_sized`: decode a T from the buffer of `io`, and consume it.
+# Return `nothing` if that fails, or the result is not decided by the buffered bytes.
+# Only the successful decoding is handled here, so that callers stay small, and need no
+# GC frame.
+@inline function try_load_fast(
+        io::AbstractBufReader, ::Type{T}, enc::Encoding
+    )::Union{Tuple{T, Int}, Nothing} where {T}
+    has_codec(T, enc) || return nothing
     buffer = get_buffer(io)::ImmutableMemoryView{UInt8}
-    holds_any(length(buffer), T, enc) || return @inline load_slow(io, T, enc)
-    result = try_decode_sized(buffer, 1, T, enc)
-    result isa DecodeError && return result
+    result = if holds_any(length(buffer), T, enc)
+        try_decode_sized(buffer, 1, T, enc)
+    elseif !isempty(buffer)
+        # Decoding from the buffer is much faster than through a `ReaderInput`. The input
+        # doesn't end at the buffer, so the result is only decided if the codec didn't
+        # need more bytes than are buffered. Else, it's rerun on the slow path.
+        decode_start(buffer, T, enc, false)
+    else
+        nothing
+    end
+    result isa Tuple{T, Int} || return nothing
+    (_, n) = result
+    @inbounds consume(io, n)
+    return result
+end
+
+# The slow path of `try_load_sized`, when `try_load_fast` returned `nothing`.
+function try_load_sized_slow(
+        io::AbstractBufReader, ::Type{T}, enc::Encoding
+    )::Union{Tuple{T, Int}, DecodeError} where {T}
+    buffer = get_buffer(io)::ImmutableMemoryView{UInt8}
+    result = if holds_any(length(buffer), T, enc)
+        @? try_decode_sized(buffer, 1, T, enc)
+    else
+        if has_codec(T, enc) && !isempty(buffer)
+            decode_start(buffer, T, enc, false) isa Invalid && return DecodeError(InvalidData)
+        end
+        return load_slow(io, T, enc)
+    end
     (_, n) = result
     @inbounds consume(io, n)
     return result
@@ -144,7 +183,17 @@ ERROR: DecodeError: Truncated input: the input ended partway through an encoded 
 [...]
 ```
 """
-function load(io::AbstractBufReader, ::Type{T}, enc::Encoding)::T where {T}
+@inline function load(io::AbstractBufReader, ::Type{T}, enc::Encoding)::T where {T}
+    # Without a codec, `try_load` may have been overloaded, so it must be called
+    if has_codec(T, enc)
+        result = try_load_fast(io, T, enc)
+        result === nothing || return first(result)
+    end
+    return @noinline load_slow_or_throw(io, T, enc)
+end
+
+# The slow path of `load`. It returns a `T`, not a union, so `load` stays small.
+function load_slow_or_throw(io::AbstractBufReader, ::Type{T}, enc::Encoding)::T where {T}
     result = try_load(io, T, enc)
     result isa DecodeError && throw_decode_error(result)
     return result

@@ -48,6 +48,7 @@ and then BitScribbling's functions automatically work for instances of `MyType` 
 Other types, like `Bool`, can be written directly to memory, but they cannot be loaded directly from memory,
 as some bit patterns are invalid. Users can define such a type as `BitsStorable()`, in which case they
 only need to add a method to `BitScribbling.is_valid_bits` to validate a given bit pattern for their type.
+This method is only needed for decoding.
 Then, all the functions in BitScribbling.jl will work for such types for encodings `LittleEndian` and `BigEndian`.
 
 Many types can be converted to and from another type that already has a codec, often a tuple.

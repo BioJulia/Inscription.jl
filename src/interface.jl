@@ -637,6 +637,7 @@ codec_max_encoded_size(::Type, ::Encoding) = NoCodec()
 
 Extension point of a hand-written codec for the value type `T` and the concrete encoding
 type `E`, see [`Encoding`](@ref). Never call it directly; call e.g. [`try_decode`](@ref).
+It is only needed for decoding: a codec that is only used for encoding need not implement it.
 
 Decode a `T` from the start of `input`, and return it with the number of bytes it was
 decoded from. Return [`Invalid()`](@ref Invalid) if the bytes are not a valid encoding.
@@ -867,6 +868,7 @@ end
 Extension point of a hand-written codec for the value type `T` and the concrete encoding
 type `E`, see [`Encoding`](@ref). Never call it directly; call [`try_encode!`](@ref) or
 [`encode!`](@ref).
+It is only needed for encoding: a codec that is only used for decoding need not implement it.
 
 Encode `x` at the start of `output`, and return the number of bytes written. Return
 [`Invalid()`](@ref Invalid) if `x` can't be encoded.

@@ -4,6 +4,7 @@
 Whether the bytes `bytes` are a valid `T`, for a type `T`.
 This function is only called for types whose [`codec_scheme`](@ref) is
 [`BitsStorable()`](@ref BitsStorable).
+It is only called when decoding, so a type that is only encoded need not implement it.
 
 `N` is the number of bytes of `T`.
 The bytes are in given in native byte order, i.e. after any potential byte swapping.

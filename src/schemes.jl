@@ -20,11 +20,16 @@ codec schemes beyond `Manual` are:
 * [`Proxy`](@ref)
 
 See extended help for which type / encoding pairs are eligible to opt into these
-codec schemes.
+codec schemes, and which methods they must implement.
 
 # Extended help
 A custom type `T` can opt into the following codec schemes. It should generally opt into the
 first applicable one on this list, as they are listed from most to least convenient.
+
+Some methods are only needed for either decoding (reading) or encoding (writing).
+A program that only decodes a type need not implement the methods that are only needed
+for encoding it, and vice versa. Attempting to encode or decode without the
+needed methods throws a `MethodError`.
 
 ## `BitsLoadable`
 This codec scheme means `T` is transparently read/writable using a pointer load/store.
@@ -54,6 +59,8 @@ To implement `BitsStorable`, type `T` needs to implement:
 
 ```
 codec_scheme(::Type{T}, ::Endianness) = BitsStorable()
+
+# Only needed for decoding
 is_valid_bits(::Type{T}, ::NTuple{sizeof(T), UInt8}) = ...
 ```
 
@@ -70,7 +77,11 @@ To implement `Proxy{P}`, type `T` for encoding `E` needs to implement:
 
 ```julia
 codec_scheme(::Type{T}, ::E) = Proxy{P}()
+
+# Only needed for encoding
 try_to_proxy(::T, ::E)::Union{P, Invalid} = ...
+
+# Only needed for decoding
 try_from_proxy(::Type{T}, ::P, ::E)::Union{T, Invalid} = ...
 ```
 
@@ -84,7 +95,11 @@ To implement a `Manual` codec for type `T` over encoding `E`, you should impleme
 
 ```julia
 codec_max_encoded_size(::Type{T}, ::E)::Union{Val{N}, Unbounded()}
+
+# Only needed for decoding
 codec_try_decode(::DecodeInput, ::Type{T}, ::E)::Union{Tuple{T, Int}, Invalid, TooShort}
+
+# Only needed for encoding
 codec_try_encode!(::EncodeOutput, ::T, ::E)::Union{Int, Invalid, TooShort}
 ```
 """
@@ -168,6 +183,7 @@ Return [`Invalid()`](@ref Invalid) if `x` can't be represented as a `P`.
 Encoding `x` then fails with `InvalidValue`.
 
 It is not called directly, but via the encoding or storing functions.
+It is only needed for encoding: a proxied type that is only decoded need not implement it.
 
 See also: [`try_from_proxy`](@ref), [`CodecScheme`](@ref)
 """
@@ -184,6 +200,7 @@ Return [`Invalid()`](@ref Invalid) if `p` can't be converted to a `T`.
 Decoding a `T` then fails with `InvalidData`, even though the bytes are a valid encoding of a `P`.
 
 It is not called directly, but via the decoding or loading functions.
+It is only needed for decoding: a proxied type that is only encoded need not implement it.
 
 See also: [`try_to_proxy`](@ref)
 """

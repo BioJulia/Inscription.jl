@@ -14,7 +14,9 @@ A type may be written in several different ways. For example, `0xa53b` may be wr
 This is modeled as zero-sized [`Encoding`](@ref) subtypes.
 Users may define arbitrary `Encoding`s and implement codecs for them.
 
-This API consists of three mandatory methods.
+This API consists of three methods.
+`codec_max_encoded_size` is always needed, while `codec_try_decode` is only needed for decoding, and `codec_try_encode!` only for encoding.
+So, if values of a type are only ever read, the codec need not implement `codec_try_encode!`, and vice versa.
 See their docstrings for details (click them to go to their docstring in this documentation).
 * [`BitScribbling.codec_max_encoded_size`](@ref) gives the maximal size in bytes for the encoding of any instance of a type, as a `Val`, or [`BitScribbling.Unbounded`](@ref) if there is none, as for strings.
 * [`BitScribbling.codec_try_decode`](@ref) attempts to decode an instance of `T` from a [`BitScribbling.DecodeInput`](@ref).
@@ -47,7 +49,8 @@ This simplifies the common case for e.g. `UInt32` where the endianness encoding 
 ### Proxies
 A type that can be converted to and from another type `P` with a codec can be encoded exactly as `P` is,
 with any encoding that `P` has a codec for, by declaring `codec_scheme` to be `Proxy{P}()`.
-Then, implement [`BitScribbling.try_to_proxy`](@ref BitScribbling.try_to_proxy) and [`BitScribbling.try_from_proxy`](@ref BitScribbling.try_from_proxy).
+Then, implement [`BitScribbling.try_to_proxy`](@ref BitScribbling.try_to_proxy), which is needed for encoding, and [`BitScribbling.try_from_proxy`](@ref BitScribbling.try_from_proxy), which is needed for decoding.
+A type that is only encoded, or only decoded, only needs the one method.
 Both may return [`Invalid()`](@ref BitScribbling.Invalid): `try_to_proxy` if the value can't be represented by the proxy,
 which makes encoding fail with `InvalidValue`, and `try_from_proxy` if the proxy is not a valid value,
 which makes decoding fail with `InvalidData`.

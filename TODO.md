@@ -1,3 +1,9 @@
+Announcement
+    * Check examples - add exact commit in post
+    * Benchmark all of them ASCII vs Base
+
+* Invalid payload?
+
 * Move to BioJulia / BitScribbling.jl
 * Add a GitHub repo description
 
@@ -11,6 +17,7 @@
 
     Ask AI for feedback
 
+* Make sure doc examples are tested - some are still in ```julia``` blocks.
 
 When publishing:
     link to https://github.com/JuliaLang/julia/pull/65191
