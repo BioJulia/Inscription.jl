@@ -54,7 +54,7 @@ n_u16s_written = encode_all!(data, view(u16s, 1:n_u16s_loaded))
 ```
 
 ## Comparison to other packages
-* **JSON.jl / TOML/jl / BSON/jl**: Inscription.jl is lower level, in that it attempts only to read/write individual values, typically `isbits` values. Inscription.jl would typically be used to implement binary formats like BSON or BAM.
+* **JSON.jl / TOML/jl / BSON/jl**: Inscription.jl is lower level, in that it attempts only to read/write individual values. Inscription.jl would typically be used to implement binary formats like BSON or BAM.
 * **BufferIO.jl**: models I/O via buffers of bytes (`UInt8`), and is more low level. Inscription.jl builds on, and depends on BufferIO.jl, and extends an analogous model of I/O for non-`UInt8` types
 * **Serialization.jl** specifies a specific format, whereas Inscription.jl is format agnostic. Also, Serialization.jl works with any Julia type, whereas reading/writing must be implemented per type in Inscription.jl's abstractions.
 
